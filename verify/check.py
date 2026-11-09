@@ -109,6 +109,14 @@ def category(report):
     return "geometry"
 
 
+def nothing_in_fusion(manifest):
+    """True when Fusion's manifest records no solids, surfaces or visible meshes."""
+    t = manifest.get("totals") or {}
+    bodies = manifest.get("bodies") or []
+    meshes = [m for m in manifest.get("meshes") or [] if m.get("visible")]
+    return not bodies and not meshes and not t.get("solid_bodies") and not t.get("bodies")
+
+
 def method_note(report):
     """Why a design used a fallback, from convert's f2s block."""
     f2s = (report or {}).get("f2s") or {}
@@ -133,6 +141,8 @@ def score(root, design_dir, archive, tol, timeout):
     sc = os.path.join(design_dir, s + ".sc")
 
     row["category"] = category(report)
+    if row["category"] == "failed" and manifest and nothing_in_fusion(manifest):
+        row["category"] = "empty"  # the converter's own error aside, Fusion has nothing to bring over
     h = (report or {}).get("history") or {}
     row["mapped"], row["total"] = h.get("mapped", ""), h.get("total", "")
     blockers = [f for f in h.get("features", []) if f.get("status") == "blocked"]
@@ -140,7 +150,9 @@ def score(root, design_dir, archive, tol, timeout):
     row["losses"] = len((report or {}).get("losses") or [])
 
     if row["category"] == "empty":
-        row["note"] = (report.get("error") or {}).get("message", "")
+        msg = ((report or {}).get("error") or {}).get("message", "")
+        row["note"] = "nothing to convert: %d sketches in Fusion, no bodies%s" % (
+            (manifest or {}).get("totals", {}).get("sketches", 0), " (%s)" % msg if msg else "")
         return row
     if not os.path.exists(sc):
         err = (report or {}).get("error") or {}
