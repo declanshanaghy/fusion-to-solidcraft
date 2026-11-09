@@ -1,13 +1,11 @@
 """Regression tests for the Fusion manifest code, run outside Fusion with a stub adsk API.
 
 Covers the failures seen in real Fusion runs: joint lists being Python vectors
-(no .count), direct-modelling designs raising on userParameters, and the tools
-failing to start from Fusion because its PYTHONHOME leaked into the system python3.
+(no .count), direct-modelling designs raising on userParameters, and mesh bodies
+(which only reach SolidCraft as STL).
 """
 
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import types
@@ -51,8 +49,9 @@ class Raises:
         raise RuntimeError("3 : this is not a parametric design")
 
 
-def design(parametric):
+def design(parametric, meshes=()):
     root = types.SimpleNamespace(name="root", bRepBodies=Coll([body("Body1", 2.0)]),
+                                 meshBodies=Coll(meshes),
                                  allOccurrences=Coll([]),
                                  allJoints=[object(), object()],  # JointVector: a list, no .count
                                  allAsBuiltJoints=[object()])
@@ -68,6 +67,22 @@ def design(parametric):
     d = cls()
     d.__dict__.update(attrs)
     return d
+
+
+class FakeExportManager:
+    """Records STL exports and writes a placeholder file, as Fusion would."""
+
+    def __init__(self):
+        self.written = []
+
+    def createSTLExportOptions(self, geometry, path):
+        return types.SimpleNamespace(geometry=geometry, path=path, isBinaryFormat=False)
+
+    def execute(self, opts):
+        with open(opts.path, "wb") as f:
+            f.write(b"solid")
+        self.written.append(opts.path)
+        return True
 
 
 class ManifestTest(unittest.TestCase):
@@ -92,42 +107,25 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(man["totals"]["joints"], 3)
         self.assertEqual([p["name"] for p in man["parameters"]], ["h"])
 
+    def test_mesh_bodies_are_listed_and_exported(self):
+        mesh = types.SimpleNamespace(name="Ball/Nut", isVisible=True)
+        hidden = types.SimpleNamespace(name="old", isVisible=False)
+        d = design(parametric=False, meshes=[mesh, hidden])
+        man = self.m.build_manifest(self.df, d, "Part.f3d")
+        self.assertEqual(man["totals"]["mesh_bodies"], 2)
+        with tempfile.TemporaryDirectory() as out:
+            errors = []
+            files = self.m.export_meshes(FakeExportManager(), d.rootComponent, out, errors)
+            self.assertEqual(files, ["meshes/01-Ball_Nut.stl"])  # hidden meshes skipped, name made safe
+            self.assertTrue(os.path.exists(os.path.join(out, files[0])))
+            self.assertEqual(errors, [])
+
     def test_write_manifest_never_raises(self):
         with tempfile.TemporaryDirectory() as d:
             man = self.m.write_manifest(d, self.df, object(), "Part.f3d", False)
             self.assertTrue(os.path.exists(os.path.join(d, "manifest.json")))
             self.assertTrue(man["errors"])
 
-
-
-class ToolEnvTest(unittest.TestCase):
-    """Running the tools from Fusion: its PYTHONHOME must not reach the system python3."""
-
-    @classmethod
-    def setUpClass(cls):
-        stub_adsk()
-        sys.path.insert(0, os.path.join(ROOT, "fusion", "lib"))
-        import f2s_export
-        cls.m = f2s_export
-
-    def test_fusion_python_vars_are_dropped(self):
-        saved = {k: os.environ.get(k) for k in ("PYTHONHOME", "PYTHONPATH")}
-        os.environ.update(PYTHONHOME="/nonexistent/fusion/python", PYTHONPATH="/nonexistent")
-        try:
-            env = self.m.tool_env()
-            self.assertNotIn("PYTHONHOME", env)
-            self.assertNotIn("PYTHONPATH", env)
-            self.assertIn("/opt/homebrew/bin", env["PATH"].split(os.pathsep))
-            py = shutil.which("python3", path=env["PATH"])
-            out = subprocess.run([py, "-E", os.path.join(ROOT, "convert", "convert.py"), "--help"],
-                                 capture_output=True, text=True, env=env)
-            self.assertEqual(out.returncode, 0, out.stderr)
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
 
 
 if __name__ == "__main__":

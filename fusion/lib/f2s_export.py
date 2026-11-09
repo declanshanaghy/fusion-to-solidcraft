@@ -1,14 +1,15 @@
 """Shared export code for the Fusion scripts in fusion/.
 
 - "Export Hub to SolidCraft" (run_hub): every design in a hub, resumable.
-- "Export Current Design to SolidCraft" (run_active): the design open in Fusion, always fresh,
-  then convert and verify just that design and show the result.
+- "Export Current Design to SolidCraft" (run_active): the design open in Fusion, always fresh.
+
+The scripts only export. Conversion and verification run outside Fusion, from the
+designs repo, so that part stays fully under your control (and testable).
 
 Both export into a designs workspace, which is your designs repo, marked by
 fusion-to-solidcraft.json at its root. Designs land in
 <workspace>/<designs_dir>/<hub>/<project>/<folders...>/<design>/. Each one gets the Fusion
-archive (.f3d, or .f3z when the design references other designs), a STEP copy, and
-manifest.json, the ground truth that verify/check.py compares the SolidCraft design
+archive (.f3d), a STEP copy, mesh bodies as STL under meshes/, and manifest.json, the ground truth that verify/check.py compares the SolidCraft design
 against.
 
 Settings are layered, later ones winning: export_config.json (the tool's defaults), the
@@ -24,8 +25,6 @@ what gets converted, is still good.
 import json
 import os
 import re
-import shutil
-import subprocess
 import time
 import traceback
 from collections import Counter
@@ -259,6 +258,46 @@ def read_bodies(root):
     return bodies, bbox_mm(boxes)
 
 
+def mesh_bodies(root):
+    """(owner, MeshBody) for every mesh body in the design, in world space."""
+    out = [(root.name, root.meshBodies.item(i)) for i in range(root.meshBodies.count)]
+    for i in range(root.allOccurrences.count):
+        occ = root.allOccurrences.item(i)
+        for j in range(occ.meshBodies.count):
+            out.append((occ.fullPathName, occ.meshBodies.item(j)))
+    return out
+
+
+def read_meshes(root):
+    return [{"name": m.name, "owner": owner, "visible": m.isVisible} for owner, m in mesh_bodies(root)]
+
+
+def export_meshes(em, root, out_dir, errors):
+    """Write each visible mesh body to meshes/<n>-<name>.stl; return the file names.
+
+    Fusion's archive stores mesh bodies in a container the converter can't decode,
+    and STEP leaves them out, so STL is the only way they reach SolidCraft.
+    """
+    files = []
+    meshes = [(o, m) for o, m in mesh_bodies(root) if m.isVisible]
+    if not meshes:
+        return files
+    mdir = os.path.join(out_dir, "meshes")
+    os.makedirs(mdir, exist_ok=True)
+    for n, (owner, m) in enumerate(meshes, 1):
+        name = "%02d-%s.stl" % (n, safe(m.name))
+        try:
+            opts = em.createSTLExportOptions(m, os.path.join(mdir, name))
+            opts.isBinaryFormat = True
+            if em.execute(opts):
+                files.append("meshes/" + name)
+            else:
+                errors.append("mesh %s: STL export returned false" % m.name)
+        except Exception as e:
+            errors.append("mesh %s: %s" % (m.name, e))
+    return files
+
+
 def read_sketches(design):
     out = []
     for i in range(design.allComponents.count):
@@ -299,6 +338,7 @@ def build_manifest(df, design, archive_name):
     timeline = attempt(errors, "timeline", lambda: read_timeline(design), []) if parametric else []
     bodies, bbox = attempt(errors, "bodies", lambda: read_bodies(root), ([], None))
     sketches = attempt(errors, "sketches", lambda: read_sketches(design), [])
+    meshes = attempt(errors, "meshes", lambda: read_meshes(root), [])
     solids = [b for b in bodies if b.get("solid") and "volume_mm3" in b]
     return {
         "schema": MANIFEST_SCHEMA,
@@ -315,22 +355,29 @@ def build_manifest(df, design, archive_name):
             "components": attempt(errors, "components", lambda: size(design.allComponents)),
             "occurrences": attempt(errors, "occurrences", lambda: size(root.allOccurrences)),
             "joints": attempt(errors, "joints", lambda: size(root.allJoints) + size(root.allAsBuiltJoints)),
+            "mesh_bodies": len(meshes),
             "sketches": len(sketches),
             "timeline_items": len(timeline),
             "feature_kinds": dict(Counter(t["type"] for t in timeline)),
         },
         "bodies": bodies,
+        "meshes": meshes,
         "sketches": sketches,
         "timeline": timeline,
         "errors": errors,
     }
 
 
-def write_manifest(out_dir, df, design, archive, reused):
+def write_manifest(out_dir, df, design, archive, reused, extra=None):
     """Write manifest.json; never raises, since the archive is already safe on disk."""
     try:
         manifest = build_manifest(df, design, os.path.basename(archive))
         manifest["fusion"]["archive_reused"] = reused
+        for key, value in (extra or {}).items():
+            if key == "errors":
+                manifest["errors"].extend(value)
+            else:
+                manifest["fusion"][key] = value
     except Exception:
         manifest = {"schema": MANIFEST_SCHEMA,
                     "fusion": {"id": df.id, "name": df.name, "version": df.versionNumber,
@@ -361,7 +408,7 @@ def reusable_archive(out_dir, stem, df):
     Lets a run whose manifests failed be finished without exporting everything again:
     the design is only opened to write the missing manifest (and STEP).
     """
-    for ext in ("f3d", "f3z"):
+    for ext in ("f3d", "f3z.f3d", "f3z"):
         path = os.path.join(out_dir, "%s.%s" % (stem, ext))
         if os.path.exists(path):
             try:
@@ -382,8 +429,11 @@ def export_doc(doc, df, out_dir, stem, cfg, with_manifest=True, reuse=None):
     if reuse:
         archive = reuse
     else:
-        ext = "f3z" if doc.documentReferences.count > 0 else "f3d"
-        archive = os.path.join(out_dir, "%s.%s" % (stem, ext))
+        # Always .f3d: Fusion's API writes a single-design archive and appends .f3d to
+        # any other extension. A design that references other designs therefore comes
+        # out without their geometry; the manifest records that (references) and
+        # convert falls back to the STEP export, which does include them.
+        archive = os.path.join(out_dir, stem + ".f3d")
         if not em.execute(em.createFusionArchiveExportOptions(archive)):
             raise RuntimeError("Fusion archive export failed")
     manifest = None
@@ -394,7 +444,14 @@ def export_doc(doc, df, out_dir, stem, cfg, with_manifest=True, reuse=None):
                 em.execute(em.createSTEPExportOptions(step))
             except Exception:
                 pass  # noted by verify (no STEP); the archive is what converts
-        manifest = write_manifest(out_dir, df, design, archive, bool(reuse))
+        notes = []
+        refs = attempt(notes, "references", lambda: [r.dataFile.name for r in
+                                                      [doc.documentReferences.item(i)
+                                                       for i in range(doc.documentReferences.count)]
+                                                      if r.dataFile], [])
+        meshes = attempt(notes, "mesh export", lambda: export_meshes(em, design.rootComponent, out_dir, notes), [])
+        manifest = write_manifest(out_dir, df, design, archive, bool(reuse),
+                                  {"references": refs, "mesh_files": meshes, "errors": notes})
     return ("manifest" if reuse else "exported"), manifest
 
 
@@ -512,49 +569,12 @@ def run_hub():
         log.close()
 
 
-def tool_env():
-    """Environment for running the tools' Python and CLIs from inside Fusion.
-
-    Fusion sets PYTHONHOME/PYTHONPATH for its embedded interpreter. A system python3
-    that inherits them can't find its own standard library ("No module named
-    'encodings'"), so those are dropped. PATH gains Homebrew's folders, which
-    Fusion's environment often lacks.
-    """
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTHON") and k != "__PYVENV_LAUNCHER__"}
-    extra = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    env["PATH"] = os.pathsep.join([p for p in env.get("PATH", "").split(os.pathsep) if p] + extra)
-    return env
-
-
-def run_tool(progress, label, args, env, log):
-    """Run a tools-repo command, keeping Fusion responsive; returns (rc, output)."""
-    progress.message = label
-    adsk.doEvents()
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-    while proc.poll() is None:
-        adsk.doEvents()
-        time.sleep(0.2)
-    out = proc.stdout.read()
-    log.write("$ %s (exit %d)\n%s" % (" ".join(args), proc.returncode, out.rstrip()))
-    return proc.returncode, out
-
-
-def scorecard_row(cfg, design_rel):
-    import csv
-    path = os.path.join(cfg["reports_dir"], "scorecard.csv")
-    try:
-        with open(path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if row.get("design") == design_rel:
-                    return row
-    except OSError:
-        pass
-    return None
-
-
 def run_active():
-    """Export Current Design to SolidCraft: the open design, always re-exported, then convert and verify it."""
+    """Export Current Design to SolidCraft: the open design, always re-exported.
+
+    Only exports. Conversion and verification run outside Fusion, from the designs
+    repo (make convert / make verify, or ONLY=<design> for just this one).
+    """
     app = adsk.core.Application.get()
     ui = app.userInterface
     doc = app.activeDocument
@@ -567,53 +587,25 @@ def run_active():
         return
     cfg = load_config(ws)
     log = Log(os.path.join(cfg["reports_dir"], "export-current.log"), "Export Current Design to SolidCraft")
-    progress = ui.createProgressDialog()
     try:
         rel = [safe(df.parentProject.parentHub.name)] + rel_parts(df)
         out_dir = os.path.join(cfg["designs_dir"], *rel)
         design_rel = "/".join(rel)
         os.makedirs(out_dir, exist_ok=True)
-        progress.show(TITLE, "Exporting %s" % design_rel, 0, 1)
-        adsk.doEvents()
         _, manifest = export_doc(doc, df, out_dir, rel[-1], cfg)
         log.write("exported %s v%d" % (design_rel, df.versionNumber))
-        lines = ["Exported %s (v%d)" % (design_rel, df.versionNumber)]
-        notes = manifest.get("errors") or []
-        if notes:
-            lines.append("Manifest notes: " + "; ".join(notes))
-
-        if cfg.get("convert_after", True):
-            env = tool_env()
-            py = shutil.which("python3", path=env["PATH"])
-            if not py:
-                raise RuntimeError("python3 not found on PATH; cannot run convert/verify")
-            common = ["--workspace", ws, "--design", out_dir]
-            py = [py, "-E"]  # -E: ignore any PYTHON* variables, belt and braces with tool_env()
-            rc, out = run_tool(progress, "Converting with Dutchman...",
-                               py + [os.path.join(TOOLS, "convert", "convert.py"), "--force"] + common, env, log)
-            if rc != 0:
-                lines.append("Convert failed:\n" + "\n".join(out.strip().splitlines()[-5:]))
-            rc, out = run_tool(progress, "Verifying...",
-                               py + [os.path.join(TOOLS, "verify", "check.py")] + common, env, log)
-            row = scorecard_row(cfg, design_rel)
-            if row:
-                lines += ["", "Category: %s (%s of %s features mapped)" % (row["category"], row["mapped"], row["total"]),
-                          "Volume match: %s (relative error %s)" % (row["volume_ok"], row["volume_rel_err"]),
-                          "Bodies: Fusion %s, SolidCraft %s" % (row["bodies_fusion"], row["bodies_sc"])]
-                if row.get("first_blocker"):
-                    lines.append("First blocker: " + row["first_blocker"])
-                if row.get("params_missing"):
-                    lines.append("Parameters missing: " + row["params_missing"])
-                if row.get("note"):
-                    lines.append("Note: " + row["note"])
-            else:
-                lines.append("Verify produced no result:\n" + "\n".join(out.strip().splitlines()[-5:]))
-        lines += ["", "Folder: " + out_dir]
-        progress.hide()
+        lines = ["Exported %s (v%d)" % (design_rel, df.versionNumber), "", "Folder: " + out_dir]
+        fusion = manifest.get("fusion", {})
+        if fusion.get("references"):
+            lines.append("References other designs: %s" % ", ".join(fusion["references"]))
+        if fusion.get("mesh_files"):
+            lines.append("Mesh bodies exported as STL: %d" % len(fusion["mesh_files"]))
+        if manifest.get("errors"):
+            lines.append("Manifest notes: " + "; ".join(manifest["errors"]))
+        lines += ["", "Next, from the designs repo:", '  make migrate ONLY="%s"' % rel[-1]]
         ui.messageBox("\n".join(lines), TITLE)
     except Exception:
         log.write("FAIL\n" + traceback.format_exc())
-        progress.hide()
         ui.messageBox("Export failed:\n" + traceback.format_exc(), TITLE)
     finally:
         log.close()

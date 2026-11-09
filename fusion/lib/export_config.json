@@ -3,6 +3,5 @@
   "projects": [],
   "limit": 0,
   "all_versions": false,
-  "export_step": true,
-  "convert_after": true
+  "export_step": true
 }

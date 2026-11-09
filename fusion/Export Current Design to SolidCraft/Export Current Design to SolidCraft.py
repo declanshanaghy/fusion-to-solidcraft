@@ -1,4 +1,4 @@
-"""Export Current Design to SolidCraft: the open design only, then convert and verify it.
+"""Export Current Design to SolidCraft: the open design only, exported fresh.
 
 The code is in ../lib/f2s_export.py, shared with the other script in fusion/.
 """
