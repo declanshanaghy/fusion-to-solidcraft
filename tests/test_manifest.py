@@ -85,6 +85,13 @@ class FakeExportManager:
         return True
 
 
+class SilentExportManager(FakeExportManager):
+    """Fusion's behaviour for some background documents: success, but no file."""
+
+    def execute(self, opts):
+        return True
+
+
 class ManifestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -135,6 +142,19 @@ class ManifestTest(unittest.TestCase):
             errors = []
             files = self.m.export_meshes(FakeExportManager(), d.rootComponent, out, errors)
             self.assertEqual((files, errors), (["meshes/01-Insert.stl"], []))
+
+    def test_unwritten_stl_is_not_listed(self):
+        # In the first clean hub export, 10 of 11 mesh designs listed STLs that Fusion
+        # never wrote (execute() returned True). They must be reported, not listed.
+        original = self.m.wait_for_file
+        self.addCleanup(setattr, self.m, "wait_for_file", original)
+        self.m.wait_for_file = lambda path, timeout=0: os.path.exists(path)  # no 15 s wait in tests
+        d = design(parametric=False, meshes=[types.SimpleNamespace(name="MeshBody1", isVisible=True)])
+        with tempfile.TemporaryDirectory() as out:
+            errors = []
+            files = self.m.export_meshes(SilentExportManager(), d.rootComponent, out, errors)
+            self.assertEqual(files, [])
+            self.assertEqual(errors, [self.m.MESH_NOT_WRITTEN + " MeshBody1"])
 
     def test_items_handles_collections_and_vectors(self):
         self.assertEqual(self.m.items(Coll([1, 2])), [1, 2])

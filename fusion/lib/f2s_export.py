@@ -293,16 +293,35 @@ def export_meshes(em, root, out_dir, errors):
     os.makedirs(mdir, exist_ok=True)
     for n, (owner, m) in enumerate(meshes, 1):
         name = "%02d-%s.stl" % (n, safe(m.name))
+        path = os.path.join(mdir, name)
         try:
-            opts = em.createSTLExportOptions(m, os.path.join(mdir, name))
+            opts = em.createSTLExportOptions(m, path)
             opts.isBinaryFormat = True
-            if em.execute(opts):
+            if not em.execute(opts):
+                errors.append("mesh %s: STL export returned false" % m.name)
+            elif wait_for_file(path):
                 files.append("meshes/" + name)
             else:
-                errors.append("mesh %s: STL export returned false" % m.name)
+                # Fusion reports success but writes nothing for some documents opened in
+                # the background; the caller retries those with the document visible.
+                errors.append("%s %s" % (MESH_NOT_WRITTEN, m.name))
         except Exception as e:
             errors.append("mesh %s: %s" % (m.name, e))
     return files
+
+
+MESH_NOT_WRITTEN = "mesh STL not written:"
+
+
+def wait_for_file(path, timeout=15.0):
+    """Fusion can finish writing an export after execute() returns; wait for it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return True
+        adsk.doEvents()
+        time.sleep(0.1)
+    return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 def read_sketches(design):
@@ -459,10 +478,20 @@ def export_file(app, df, out_dir, stem, cfg, with_manifest=True, allow_reuse=Tru
     reuse = reusable_archive(out_dir, stem, df) if (with_manifest and allow_reuse) else None
     doc, ours = open_doc(app, df)
     try:
-        return export_doc(doc, df, out_dir, stem, cfg, with_manifest, reuse)
+        how, manifest = export_doc(doc, df, out_dir, stem, cfg, with_manifest, reuse)
     finally:
         if ours:
             doc.close(False)
+    if ours and manifest and any(e.startswith(MESH_NOT_WRITTEN) for e in manifest.get("errors", [])):
+        # Mesh STLs only reliably export from a visible document: reopen it visibly and
+        # redo just the manifest and meshes, reusing the archive written above.
+        doc = app.documents.open(df, True)
+        try:
+            archive = os.path.join(out_dir, manifest["fusion"]["archive"])
+            _, manifest = export_doc(doc, df, out_dir, stem, cfg, with_manifest, archive)
+        finally:
+            doc.close(False)
+    return how, manifest
 
 
 def export_versions(app, df, out_dir, stem, cfg):
