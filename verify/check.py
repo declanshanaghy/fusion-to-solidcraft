@@ -8,7 +8,9 @@ writes scorecard.csv and scorecard.md into the workspace's reports folder.
 Category per design:
   full      every Fusion feature mapped into editable SolidCraft history
   partial   history up to the first unmapped feature, final shape imported after it
-  geometry  shape only (no editable history)
+  geometry  shape only (no editable history), including designs converted from STEP
+  mesh      mesh bodies only (Fusion mesh bodies, brought over as STL)
+  empty     nothing to convert: Fusion has no solids, surfaces or meshes in it
   failed    no .sc, the conversion failed, or SolidCraft cannot evaluate it
 A design is also flagged when its volume, body count or parameters disagree.
 
@@ -84,9 +86,20 @@ def norm_expr(e):
     return re.sub(r"\s+", "", str(e or "")).lower()
 
 
+CATEGORIES = ("full", "partial", "geometry", "mesh", "empty", "failed")
+
+
 def category(report):
-    if not report or not report.get("ok"):
+    if not report:
         return "failed"
+    method = (report.get("f2s") or {}).get("method", "archive")
+    if not report.get("ok"):
+        kind = (report.get("error") or {}).get("kind")
+        return "empty" if kind == "no_geometry" else "failed"
+    if method == "mesh":
+        return "mesh"
+    if method == "step":
+        return "geometry"
     h = report.get("history") or {}
     mapped, total = h.get("mapped", 0), h.get("total", 0)
     if total and mapped >= total:
@@ -96,20 +109,18 @@ def category(report):
     return "geometry"
 
 
-def step_totals(step, timeout):
-    """Manifest-style totals measured from Fusion's STEP export of the design."""
-    ev, err = sc_eval(step, timeout)
-    if ev is None:
-        return None, err
-    bodies = ev.get("bodies", [])
-    vol = sum(b.get("volume_mm3", 0.0) for b in bodies)
-    boxes = [b["bbox"] for b in bodies if b.get("bbox")]
-    bbox = None
-    if boxes:
-        bbox = {"min": [min(b["min"][i] for b in boxes) for i in range(3)],
-                "max": [max(b["max"][i] for b in boxes) for i in range(3)]}
-    return {"solid_bodies": ev.get("body_count", len(bodies)), "volume_mm3_all_solids": vol,
-            "volume_mm3_visible_solids": vol, "bbox_mm": bbox}, None
+def method_note(report):
+    """Why a design used a fallback, from convert's f2s block."""
+    f2s = (report or {}).get("f2s") or {}
+    method, attempts = f2s.get("method", "archive"), f2s.get("attempts") or []
+    first = (attempts[0].get("error") if attempts else None) or ""
+    if method == "step":
+        return "converted from Fusion STEP (archive: %s)" % first
+    if method == "mesh":
+        return "mesh bodies only (archive: %s)" % first
+    if method.startswith("archive-"):
+        return "used preset %s (%s)" % (method.split("-", 1)[1], first)
+    return ""
 
 
 def score(root, design_dir, archive, tol, timeout):
@@ -128,8 +139,12 @@ def score(root, design_dir, archive, tol, timeout):
     row["first_blocker"] = ("%s: %s" % (blockers[0]["name"], blockers[0].get("reason"))) if blockers else ""
     row["losses"] = len((report or {}).get("losses") or [])
 
+    if row["category"] == "empty":
+        row["note"] = (report.get("error") or {}).get("message", "")
+        return row
     if not os.path.exists(sc):
-        row.update(category="failed", note="no .sc (run tools/convert/convert.py)")
+        err = (report or {}).get("error") or {}
+        row.update(category="failed", note=err.get("message") or "no .sc (run convert first)")
         return row
     ev, err = sc_eval(sc, timeout)
     if ev is None:
@@ -139,6 +154,18 @@ def score(root, design_dir, archive, tol, timeout):
     bodies, body_note = (final_bodies(sc, ev, timeout) if row["category"] == "partial"
                          else (ev.get("bodies", []), ""))
     row["bodies_sc"] = len(bodies)
+    if row["category"] == "mesh":
+        # Fusion reports no volume for mesh bodies and leaves them out of STEP, so there
+        # is no geometry reference; count them against the manifest when there is one.
+        row["volume_ok"] = "n/a"
+        notes = [method_note(report)]
+        if manifest:
+            want = sum(1 for m in manifest.get("meshes", []) if m.get("visible"))
+            row["bodies_fusion"] = want
+            if want != row["bodies_sc"]:
+                notes.append("mesh count differs")
+        row["note"] = "; ".join(n for n in notes if n)
+        return row
 
     step = os.path.join(design_dir, s + ".step")
     if manifest:
@@ -180,7 +207,7 @@ def score(root, design_dir, archive, tol, timeout):
                and norm_expr(p["expression"]) != norm_expr(sc_params[p["name"]].get("expression"))]
     row["params_missing"] = " ".join(missing)
     row["params_changed"] = " ".join(changed)
-    notes = [body_note] if body_note else []
+    notes = [n for n in (method_note(report), body_note) if n]
     if row.get("volume_ok") is False:
         notes.append("volume differs")
     if row["bodies_sc"] != row["bodies_fusion"]:
@@ -194,7 +221,7 @@ def score(root, design_dir, archive, tol, timeout):
 
 
 def write_md(rows, path, versions):
-    counts = {c: sum(1 for r in rows if r["category"] == c) for c in ("full", "partial", "geometry", "failed")}
+    counts = {c: sum(1 for r in rows if r["category"] == c) for c in CATEGORIES}
     flagged = [r for r in rows if r.get("note")]
     lines = ["# Migration scorecard", "",
              "Tools: " + ", ".join("%s %s" % kv for kv in versions.items())

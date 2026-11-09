@@ -83,7 +83,9 @@ def design_dirs(root, only=None):
 
 
 def stem(archive):
-    return os.path.splitext(os.path.basename(archive))[0]
+    """Design name of an archive: X.f3d -> X (and X.f3z.f3d, from older exports, -> X)."""
+    name = os.path.splitext(os.path.basename(archive))[0]
+    return name[:-4] if name.endswith(".f3z") else name
 
 
 def load_json(path):
