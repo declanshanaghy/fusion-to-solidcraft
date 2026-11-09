@@ -140,7 +140,7 @@ def choose_hub(app, ui, preferred):
     The prompt is prefilled with the configured hub (or the first hub), and the choice
     is saved to export_config.local.json so the next run defaults to it.
     """
-    hubs = [app.data.dataHubs.item(i) for i in range(app.data.dataHubs.count)]
+    hubs = items(app.data.dataHubs)
     if not hubs:
         ui.messageBox("No Fusion hubs found for this account.")
         return None
@@ -166,10 +166,8 @@ def choose_hub(app, ui, preferred):
 
 def collect(folder, rel, out):
     """Append (DataFile, relative path parts) for every design under folder."""
-    files = folder.dataFiles
     seen = Counter()
-    for i in range(files.count):
-        df = files.item(i)
+    for df in items(folder.dataFiles):
         if df.fileExtension != "f3d":
             continue  # drawings (.f2d), CAM-only files, uploads: not designs
         base = safe(df.name)
@@ -177,9 +175,7 @@ def collect(folder, rel, out):
         leaf = base if seen[base] == 1 else "%s (%s)" % (base, df.id[-8:])
         out.append((df, rel + [leaf]))
         adsk.doEvents()
-    subs = folder.dataFolders
-    for i in range(subs.count):
-        sub = subs.item(i)
+    for sub in items(folder.dataFolders):
         collect(sub, rel + [safe(sub.name)], out)
 
 
@@ -195,11 +191,27 @@ def rel_parts(df):
 
 # ---------------------------------------------------------------- manifest
 
+def items(coll):
+    """The items of a Fusion collection (.count/.item) or vector, as a list.
+
+    Some Fusion API properties return collections and others return vectors (Python
+    sequences such as JointVector or MeshBodyVector) with no .count or .item. Every
+    list the export reads goes through this, so it never assumes which one it gets.
+    """
+    if coll is None:
+        return []
+    if hasattr(coll, "item") and hasattr(coll, "count") and not isinstance(coll, (list, tuple)):
+        return [coll.item(i) for i in range(coll.count)]
+    return list(coll)
+
+
 def size(coll):
-    """Item count of a Fusion collection (.count) or vector (a Python list)."""
-    if isinstance(coll, (list, tuple)):
-        return len(coll)
-    return coll.count if hasattr(coll, "count") else len(coll)
+    """Item count of a Fusion collection or vector."""
+    if coll is None:
+        return 0
+    if hasattr(coll, "count") and not isinstance(coll, (list, tuple)):
+        return coll.count
+    return len(coll)
 
 
 def attempt(errors, what, fn, default=None):
@@ -229,8 +241,7 @@ def bbox_mm(boxes):
 def read_parameters(design):
     um = design.unitsManager
     out = []
-    for i in range(design.userParameters.count):
-        p = design.userParameters.item(i)
+    for p in items(design.userParameters):
         out.append({"name": p.name, "expression": p.expression, "unit": p.unit,
                     "value": fmt_value(um, p), "comment": p.comment})
     return out
@@ -240,12 +251,10 @@ def read_bodies(root):
     """Bodies in world space: root bodies plus every occurrence's body proxies."""
     bodies, boxes = [], []
     sources = [(root.name, root.bRepBodies)]
-    for i in range(root.allOccurrences.count):
-        occ = root.allOccurrences.item(i)
+    for occ in items(root.allOccurrences):
         sources.append((occ.fullPathName, occ.bRepBodies))
     for owner, coll in sources:
-        for j in range(coll.count):
-            b = coll.item(j)
+        for b in items(coll):
             entry = {"name": b.name, "owner": owner, "solid": b.isSolid, "visible": b.isVisible}
             try:
                 entry["volume_mm3"] = b.volume * 1000.0
@@ -260,11 +269,9 @@ def read_bodies(root):
 
 def mesh_bodies(root):
     """(owner, MeshBody) for every mesh body in the design, in world space."""
-    out = [(root.name, root.meshBodies.item(i)) for i in range(root.meshBodies.count)]
-    for i in range(root.allOccurrences.count):
-        occ = root.allOccurrences.item(i)
-        for j in range(occ.meshBodies.count):
-            out.append((occ.fullPathName, occ.meshBodies.item(j)))
+    out = [(root.name, m) for m in items(root.meshBodies)]
+    for occ in items(root.allOccurrences):
+        out.extend((occ.fullPathName, m) for m in items(occ.meshBodies))
     return out
 
 
@@ -300,23 +307,19 @@ def export_meshes(em, root, out_dir, errors):
 
 def read_sketches(design):
     out = []
-    for i in range(design.allComponents.count):
-        comp = design.allComponents.item(i)
-        for j in range(comp.sketches.count):
-            sk = comp.sketches.item(j)
+    for comp in items(design.allComponents):
+        for sk in items(comp.sketches):
             out.append({"name": sk.name, "component": comp.name,
-                        "curves": sk.sketchCurves.count,
-                        "constraints": sk.geometricConstraints.count,
-                        "dimensions": sk.sketchDimensions.count,
+                        "curves": size(sk.sketchCurves),
+                        "constraints": size(sk.geometricConstraints),
+                        "dimensions": size(sk.sketchDimensions),
                         "fully_constrained": sk.isFullyConstrained})
     return out
 
 
 def read_timeline(design):
     out = []
-    tl = design.timeline
-    for i in range(tl.count):
-        item = tl.item(i)
+    for i, item in enumerate(items(design.timeline)):
         kind = "Group" if item.isGroup else "Unknown"
         try:
             if not item.isGroup and item.entity:
@@ -392,8 +395,7 @@ def write_manifest(out_dir, df, design, archive, reused, extra=None):
 
 def open_doc(app, df):
     """Return (doc, opened_by_us). Reuses a document the user already has open."""
-    for i in range(app.documents.count):
-        d = app.documents.item(i)
+    for d in items(app.documents):
         try:
             if d.dataFile and d.dataFile.id == df.id and d.dataFile.versionNumber == df.versionNumber:
                 return d, False
@@ -445,10 +447,8 @@ def export_doc(doc, df, out_dir, stem, cfg, with_manifest=True, reuse=None):
             except Exception:
                 pass  # noted by verify (no STEP); the archive is what converts
         notes = []
-        refs = attempt(notes, "references", lambda: [r.dataFile.name for r in
-                                                      [doc.documentReferences.item(i)
-                                                       for i in range(doc.documentReferences.count)]
-                                                      if r.dataFile], [])
+        refs = attempt(notes, "references",
+                       lambda: [r.dataFile.name for r in items(doc.documentReferences) if r.dataFile], [])
         meshes = attempt(notes, "mesh export", lambda: export_meshes(em, design.rootComponent, out_dir, notes), [])
         manifest = write_manifest(out_dir, df, design, archive, bool(reuse),
                                   {"references": refs, "mesh_files": meshes, "errors": notes})
@@ -468,9 +468,7 @@ def export_file(app, df, out_dir, stem, cfg, with_manifest=True, allow_reuse=Tru
 def export_versions(app, df, out_dir, stem, cfg):
     vdir = os.path.join(out_dir, "versions")
     os.makedirs(vdir, exist_ok=True)
-    versions = df.versions
-    for v in range(versions.count):
-        vf = versions.item(v)
+    for vf in items(df.versions):
         if vf.versionNumber == df.versionNumber:
             continue
         vstem = "%s.v%d" % (stem, vf.versionNumber)
@@ -509,9 +507,7 @@ def run_hub():
 
         wanted = set(cfg.get("projects") or [])
         jobs = []
-        projects = hub.dataProjects
-        for i in range(projects.count):
-            proj = projects.item(i)
+        for proj in items(hub.dataProjects):
             if not wanted or proj.name in wanted:
                 collect(proj.rootFolder, [safe(proj.name)], jobs)
         limit = int(cfg.get("limit") or 0)

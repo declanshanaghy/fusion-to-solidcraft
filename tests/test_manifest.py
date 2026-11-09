@@ -49,10 +49,10 @@ class Raises:
         raise RuntimeError("3 : this is not a parametric design")
 
 
-def design(parametric, meshes=()):
+def design(parametric, meshes=(), occurrences=()):
     root = types.SimpleNamespace(name="root", bRepBodies=Coll([body("Body1", 2.0)]),
                                  meshBodies=Coll(meshes),
-                                 allOccurrences=Coll([]),
+                                 allOccurrences=Coll(occurrences),
                                  allJoints=[object(), object()],  # JointVector: a list, no .count
                                  allAsBuiltJoints=[object()])
     comp = types.SimpleNamespace(name="root", sketches=Coll([]))
@@ -119,6 +119,28 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(files, ["meshes/01-Ball_Nut.stl"])  # hidden meshes skipped, name made safe
             self.assertTrue(os.path.exists(os.path.join(out, files[0])))
             self.assertEqual(errors, [])
+
+    def test_occurrence_vectors_are_read(self):
+        # Fusion returns an occurrence's meshBodies as a MeshBodyVector: a plain sequence
+        # with no .count/.item. 70 designs lost their mesh STLs to this in a real run.
+        occ_mesh = types.SimpleNamespace(name="Insert", isVisible=True)
+        occ = types.SimpleNamespace(fullPathName="root+Part:1", bRepBodies=[body("Inner", 1.0)],
+                                    meshBodies=[occ_mesh])
+        d = design(parametric=True, occurrences=[occ])
+        man = self.m.build_manifest(self.df, d, "Part.f3d")
+        self.assertEqual(man["errors"], [])
+        self.assertEqual(man["totals"]["mesh_bodies"], 1)
+        self.assertEqual(man["totals"]["solid_bodies"], 2)
+        with tempfile.TemporaryDirectory() as out:
+            errors = []
+            files = self.m.export_meshes(FakeExportManager(), d.rootComponent, out, errors)
+            self.assertEqual((files, errors), (["meshes/01-Insert.stl"], []))
+
+    def test_items_handles_collections_and_vectors(self):
+        self.assertEqual(self.m.items(Coll([1, 2])), [1, 2])
+        self.assertEqual(self.m.items([3]), [3])
+        self.assertEqual(self.m.items(None), [])
+        self.assertEqual((self.m.size(Coll([1])), self.m.size([1, 2]), self.m.size(None)), (1, 2, 0))
 
     def test_write_manifest_never_raises(self):
         with tempfile.TemporaryDirectory() as d:
