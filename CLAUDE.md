@@ -17,9 +17,9 @@ Working across the two:
   names that tools revision (the scorecard header records it as `fusion-to-solidcraft <rev>`).
 - Upgrading Dutchman or SolidCraft is a workspace change: `make reconvert verify` there, then update `versions`
   in its marker file in the same commit as the new `.sc` files.
-- The Fusion scripts (`Export Hub to SolidCraft`, `Export to SolidCraft Test`) are thin wrappers over `fusion/lib/f2s_export.py`,
+- The Fusion scripts (`Export Hub to SolidCraft`, `Export Current Design to SolidCraft`) are thin wrappers over `fusion/lib/f2s_export.py`,
   loaded through symlinks (`make install-fusion`). They reload the module on every run, so edits take effect without restarting
-  Fusion. Iterate on one design with the Test script: it exports the open design, converts and verifies it, and shows the result.
+  Fusion. Iterate on one design with Export Current Design to SolidCraft: it exports the open design, converts and verifies it, and shows the result.
 - A design fails only when its archive can't be exported. Manifest problems are recorded in the manifest's `errors` list.
   Any new Fusion API read must go through `attempt()`, and gets a stub test in `tests/` when it has failed in the field.
 - Checks before pushing here: `make check` (syntax and the stub-API tests), plus a convert and verify run on a workspace when

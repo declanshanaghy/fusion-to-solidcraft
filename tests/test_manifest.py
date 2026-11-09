@@ -1,10 +1,13 @@
 """Regression tests for the Fusion manifest code, run outside Fusion with a stub adsk API.
 
-Covers the two failures from the first real export: joint lists being Python
-vectors (no .count), and direct-modelling designs raising on userParameters.
+Covers the failures seen in real Fusion runs: joint lists being Python vectors
+(no .count), direct-modelling designs raising on userParameters, and the tools
+failing to start from Fusion because its PYTHONHOME leaked into the system python3.
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -94,6 +97,37 @@ class ManifestTest(unittest.TestCase):
             man = self.m.write_manifest(d, self.df, object(), "Part.f3d", False)
             self.assertTrue(os.path.exists(os.path.join(d, "manifest.json")))
             self.assertTrue(man["errors"])
+
+
+
+class ToolEnvTest(unittest.TestCase):
+    """Running the tools from Fusion: its PYTHONHOME must not reach the system python3."""
+
+    @classmethod
+    def setUpClass(cls):
+        stub_adsk()
+        sys.path.insert(0, os.path.join(ROOT, "fusion", "lib"))
+        import f2s_export
+        cls.m = f2s_export
+
+    def test_fusion_python_vars_are_dropped(self):
+        saved = {k: os.environ.get(k) for k in ("PYTHONHOME", "PYTHONPATH")}
+        os.environ.update(PYTHONHOME="/nonexistent/fusion/python", PYTHONPATH="/nonexistent")
+        try:
+            env = self.m.tool_env()
+            self.assertNotIn("PYTHONHOME", env)
+            self.assertNotIn("PYTHONPATH", env)
+            self.assertIn("/opt/homebrew/bin", env["PATH"].split(os.pathsep))
+            py = shutil.which("python3", path=env["PATH"])
+            out = subprocess.run([py, "-E", os.path.join(ROOT, "convert", "convert.py"), "--help"],
+                                 capture_output=True, text=True, env=env)
+            self.assertEqual(out.returncode, 0, out.stderr)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

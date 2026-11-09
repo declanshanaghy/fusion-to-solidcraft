@@ -71,7 +71,7 @@ If the workspace is a git repo, track the CAD binaries with Git LFS (`*.f3d *.f3
      (untracked), which is also where one-off overrides go, such as `"limit": 5`. Re-running
      is safe: a design whose Fusion version hasn't changed is skipped, and if a design's archive
      is already on disk but its manifest is missing, only the manifest is written.
-   - **Export to SolidCraft Test** exports just the design open in Fusion, always fresh. It then
+   - **Export Current Design to SolidCraft** exports just the design open in Fusion, always fresh. It then
      runs convert and verify on that design and shows the result: category, mapped features,
      first blocker, volume match. This is the quick loop for one design. Set `"convert_after":
      false` to export only.

@@ -1,7 +1,7 @@
 """Shared export code for the Fusion scripts in fusion/.
 
 - "Export Hub to SolidCraft" (run_hub): every design in a hub, resumable.
-- "Export to SolidCraft Test" (run_active): the design open in Fusion, always fresh,
+- "Export Current Design to SolidCraft" (run_active): the design open in Fusion, always fresh,
   then convert and verify just that design and show the result.
 
 Both export into a designs workspace, which is your designs repo, marked by
@@ -513,8 +513,15 @@ def run_hub():
 
 
 def tool_env():
-    """PATH for the tools: Fusion's own environment often lacks Homebrew's bin folders."""
-    env = dict(os.environ)
+    """Environment for running the tools' Python and CLIs from inside Fusion.
+
+    Fusion sets PYTHONHOME/PYTHONPATH for its embedded interpreter. A system python3
+    that inherits them can't find its own standard library ("No module named
+    'encodings'"), so those are dropped. PATH gains Homebrew's folders, which
+    Fusion's environment often lacks.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTHON") and k != "__PYVENV_LAUNCHER__"}
     extra = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
     env["PATH"] = os.pathsep.join([p for p in env.get("PATH", "").split(os.pathsep) if p] + extra)
     return env
@@ -547,19 +554,19 @@ def scorecard_row(cfg, design_rel):
 
 
 def run_active():
-    """Export to SolidCraft Test: the open design, always re-exported, then convert and verify it."""
+    """Export Current Design to SolidCraft: the open design, always re-exported, then convert and verify it."""
     app = adsk.core.Application.get()
     ui = app.userInterface
     doc = app.activeDocument
     df = doc.dataFile if doc else None
     if not df:
-        ui.messageBox("Open a saved design first. The test exports the active document.", TITLE)
+        ui.messageBox("Open a saved design first: this exports the active document.", TITLE)
         return
     ws = choose_workspace(ui)
     if not ws:
         return
     cfg = load_config(ws)
-    log = Log(os.path.join(cfg["reports_dir"], "export-test.log"), "Export to SolidCraft Test")
+    log = Log(os.path.join(cfg["reports_dir"], "export-current.log"), "Export Current Design to SolidCraft")
     progress = ui.createProgressDialog()
     try:
         rel = [safe(df.parentProject.parentHub.name)] + rel_parts(df)
@@ -581,12 +588,13 @@ def run_active():
             if not py:
                 raise RuntimeError("python3 not found on PATH; cannot run convert/verify")
             common = ["--workspace", ws, "--design", out_dir]
+            py = [py, "-E"]  # -E: ignore any PYTHON* variables, belt and braces with tool_env()
             rc, out = run_tool(progress, "Converting with Dutchman...",
-                               [py, os.path.join(TOOLS, "convert", "convert.py"), "--force"] + common, env, log)
+                               py + [os.path.join(TOOLS, "convert", "convert.py"), "--force"] + common, env, log)
             if rc != 0:
                 lines.append("Convert failed:\n" + "\n".join(out.strip().splitlines()[-5:]))
             rc, out = run_tool(progress, "Verifying...",
-                               [py, os.path.join(TOOLS, "verify", "check.py")] + common, env, log)
+                               py + [os.path.join(TOOLS, "verify", "check.py")] + common, env, log)
             row = scorecard_row(cfg, design_rel)
             if row:
                 lines += ["", "Category: %s (%s of %s features mapped)" % (row["category"], row["mapped"], row["total"]),
@@ -606,6 +614,6 @@ def run_active():
     except Exception:
         log.write("FAIL\n" + traceback.format_exc())
         progress.hide()
-        ui.messageBox("Export test failed:\n" + traceback.format_exc(), TITLE)
+        ui.messageBox("Export failed:\n" + traceback.format_exc(), TITLE)
     finally:
         log.close()
