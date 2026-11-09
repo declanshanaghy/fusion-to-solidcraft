@@ -5,10 +5,10 @@ For each design folder it compares <design>.sc (measured with `solidcraft-cli ev
 with manifest.json (written by the Fusion export) and <design>.dutchman.json, then
 writes scorecard.csv and scorecard.md into the workspace's reports folder.
 
-Category per design:
-  full      every Fusion feature mapped into editable SolidCraft history
-  partial   history up to the first unmapped feature, final shape imported after it
-  geometry  shape only (no editable history), including designs converted from STEP
+Category per design (from Dutchman's mode):
+  full      the editable SolidCraft history rebuilds the Fusion shape by itself
+  partial   editable history up to a feature it can't replay, then the final shape imported
+  geometry  shape only (sketches may be kept beside it), including designs converted from STEP
   mesh      mesh bodies only (Fusion mesh bodies, brought over as STL)
   empty     nothing to convert: Fusion has no solids, surfaces or meshes in it
   failed    no .sc, the conversion failed, or SolidCraft cannot evaluate it
@@ -64,7 +64,11 @@ def final_bodies(sc, ev, timeout):
     """
     bodies = ev.get("bodies", [])
     timeline = ev.get("timeline", [])
-    imports = [i for i, t in enumerate(timeline) if t.get("type") == "BaseFeature"]
+    # Only Dutchman's own import of the final shape; a design can import other parts
+    # (STEP, referenced designs) mid-timeline, and those bodies are part of the shape.
+    # A full conversion keeps that import too, suppressed, as a reference: skip it.
+    imports = [i for i, t in enumerate(timeline) if t.get("type") == "BaseFeature"
+               and str(t.get("name", "")).startswith(FINAL_IMPORT) and not t.get("suppressed")]
     if not imports or imports[-1] == 0:
         return bodies, ""
     before, err = sc_eval(sc, timeout, {"commands": [
@@ -82,16 +86,38 @@ def final_bodies(sc, ev, timeout):
     return final, ""
 
 
+FINAL_IMPORT = "Original geometry"
+
+
 def vol(body):
     """A body's volume in mm³; SolidCraft reports null for open bodies such as surfaces."""
     return body.get("volume_mm3") or 0.0
 
 
 def norm_expr(e):
-    return re.sub(r"\s+", "", str(e or "")).lower()
+    """An expression in a comparable form: no spaces, and Fusion's unit shorthands spelled out."""
+    e = re.sub(r"\s+", "", str(e or "")).lower()
+    return e.replace('"', "in").replace("\u00b0", "deg")
 
 
 CATEGORIES = ("full", "partial", "geometry", "mesh", "empty", "failed")
+
+
+TO_MM_DEG = {"": 1.0, "mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4, '"': 25.4, "ft": 304.8, "'": 304.8,
+             "deg": 1.0, "\u00b0": 1.0, "rad": 180.0 / 3.141592653589793}
+LITERAL = re.compile(r"^\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*(mm|cm|m|in|ft|deg|rad|\"|'|\u00b0)?\s*$", re.I)
+
+
+def same_param(fusion_expr, sc_param):
+    """Whether a SolidCraft parameter keeps a Fusion parameter's expression, or at least its
+    value: Dutchman rewrites a literal like 0.75" as 19.05 mm, which is the same value."""
+    if norm_expr(fusion_expr) == norm_expr(sc_param.get("expression")):
+        return True
+    m = LITERAL.match(str(fusion_expr or ""))
+    if not m or sc_param.get("value") is None:
+        return False
+    want = float(m.group(1)) * TO_MM_DEG[(m.group(2) or "").lower()]
+    return abs(want - sc_param["value"]) <= 1e-6 * max(1.0, abs(want))
 
 
 def category(report):
@@ -107,19 +133,17 @@ def category(report):
         return "geometry"
     h = report.get("history") or {}
     mapped, total = h.get("mapped", 0), h.get("total", 0)
-    if total and mapped >= total:
+    mode = report.get("mode")
+    if mode == "history" or (mode is None and total and mapped >= total):
         return "full"
-    if mapped:
+    if mode == "partial_history" or (mode is None and mapped):
+        # Even with every feature mapped, partial_history means the replayed history
+        # didn't reproduce Fusion's shape, so the original geometry was imported after it.
         return "partial"
-    return "geometry"
+    return "geometry"  # "import": the shape is imported; any mapped items are kept sketches
 
 
-def nothing_in_fusion(manifest):
-    """True when Fusion's manifest records no solids, surfaces or visible meshes."""
-    t = manifest.get("totals") or {}
-    bodies = manifest.get("bodies") or []
-    meshes = [m for m in manifest.get("meshes") or [] if m.get("visible")]
-    return not bodies and not meshes and not t.get("solid_bodies") and not t.get("bodies")
+nothing_in_fusion = common.nothing_in_fusion
 
 
 def method_note(report):
@@ -184,8 +208,8 @@ def score(root, design_dir, archive, tol, timeout):
         row.update(category="failed", note=err)
         return row
     row["timeline_errors"] = sum(1 for t in ev.get("timeline", []) if t.get("error"))
-    bodies, body_note = (final_bodies(sc, ev, timeout) if row["category"] == "partial"
-                         else (ev.get("bodies", []), ""))
+    bodies, body_note = ((ev.get("bodies", []), "") if row["category"] == "mesh"
+                         else final_bodies(sc, ev, timeout))
     row["bodies_sc"] = len(bodies)
     if row["category"] == "mesh":
         # Fusion reports no volume for mesh bodies and leaves them out of STEP, so there
@@ -216,8 +240,13 @@ def score(root, design_dir, archive, tol, timeout):
         return row
 
     row["bodies_fusion"] = t["solid_bodies"]
+    solids = [b for b in (manifest or {}).get("bodies", []) if b.get("solid")]
+    visible = sum(1 for b in solids if b.get("visible")) if solids else t["solid_bodies"]
+    hidden = len(solids) - visible if solids else 0
     vol_sc = sum(vol(b) for b in bodies)
-    refs = [v for v in (t.get("volume_mm3_visible_solids"), t.get("volume_mm3_all_solids")) if v]
+    open_bodies = sum(1 for b in bodies if b.get("closed") is False)
+    vis_v, all_v = t.get("volume_mm3_visible_solids"), t.get("volume_mm3_all_solids")
+    refs = [v for v in (vis_v, all_v) if v]
     if refs:
         rel = min(abs(vol_sc - v) / v for v in refs)
         row["volume_rel_err"] = "%.5f" % rel
@@ -237,14 +266,25 @@ def score(root, design_dir, archive, tol, timeout):
     row["params_fusion"] = len(fparams) if manifest else "n/a"
     missing = [p["name"] for p in fparams if p["name"] not in sc_params]
     changed = [p["name"] for p in fparams if p["name"] in sc_params
-               and norm_expr(p["expression"]) != norm_expr(sc_params[p["name"]].get("expression"))]
+               and not same_param(p["expression"], sc_params[p["name"]])]
     row["params_missing"] = " ".join(missing)
     row["params_changed"] = " ".join(changed)
     notes = [n for n in (method_note(report), body_note) if n]
+    if open_bodies:
+        notes.append("%d open bodies (not watertight, no volume)" % open_bodies)
     if row.get("volume_ok") is False:
-        notes.append("volume differs")
-    if row["bodies_sc"] != row["bodies_fusion"]:
-        notes.append("body count differs")
+        if vis_v and hidden and vol_sc > vis_v * (1 + tol):
+            notes.append("volume differs: %d bodies hidden in Fusion came in visible" % hidden)
+        elif vis_v and vol_sc < vis_v * (1 - tol) and (manifest or {}).get("fusion", {}).get("references"):
+            notes.append("volume differs: referenced designs (%s) missing"
+                         % ", ".join(manifest["fusion"]["references"]))
+        else:
+            notes.append("volume differs")
+    if row["bodies_sc"] not in (row["bodies_fusion"], visible):
+        # Bodies merged into one (or split) with the volume intact is a structure change,
+        # not lost geometry; it's still noted, since parts may need separating again.
+        notes.append("body count differs" if row.get("volume_ok") is not True
+                     else "bodies merged or split (volume matches)")
     if missing:
         notes.append("%d params missing" % len(missing))
     if row["timeline_errors"]:

@@ -15,7 +15,7 @@ Working across the two:
   The export resumes, and `convert` skips `.sc` files that are up to date (use `--force` after a tool change that affects output).
 - A workspace commit that adds or refreshes converted designs comes after the tools commit it depends on, and its message
   names that tools revision (the scorecard header records it as `fusion-to-solidcraft <rev>`).
-- Upgrading Dutchman or SolidCraft is a workspace change: `make reconvert verify` there, then update `versions`
+- Upgrading Dutchman or SolidCraft is a workspace change: `make reconvert verify report` there, then update `versions`
   in its marker file in the same commit as the new `.sc` files.
 - **Fusion only exports.** The Fusion scripts (`Export Hub to SolidCraft`, `Export Current Design to SolidCraft`) are thin wrappers over
   `fusion/lib/f2s_export.py`, loaded through symlinks (`make install-fusion`). They reload the module on every run, so edits take

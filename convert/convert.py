@@ -22,6 +22,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,8 +36,14 @@ STEP_SOLIDS = (b"MANIFOLD_SOLID_BREP", b"BREP_WITH_VOIDS", b"SHELL_BASED_SURFACE
 
 
 def up_to_date(archive, sc, report):
-    return (os.path.exists(sc) and os.path.exists(report)
-            and os.path.getmtime(sc) >= os.path.getmtime(archive))
+    """Whether the last conversion still stands: its .sc is newer than the archive, or the
+    archive had no geometry at all (no .sc to make, so re-running would only repeat that)."""
+    if not os.path.exists(report) or os.path.getmtime(report) < os.path.getmtime(archive):
+        return False
+    if os.path.exists(sc):
+        return os.path.getmtime(sc) >= os.path.getmtime(archive)
+    r = common.load_json(report)
+    return (r.get("error") or {}).get("kind") == "no_geometry" or (r.get("f2s") or {}).get("empty", False)
 
 
 def dutchman(src, sc, preset, log, timeout):
@@ -99,8 +106,111 @@ def from_meshes(files, sc, timeout):
         return p.returncode == 0, (p.stderr.strip().splitlines() or [""])[-1]
 
 
+IDENT = re.compile(r"[A-Za-z_]\w*")
+
+
+def param_order(params):
+    """Fusion user parameters ordered so each comes after the parameters its expression uses."""
+    by_name = {p["name"]: p for p in params}
+    done, order = set(), []
+
+    def visit(name, path):
+        if name in done or name in path:
+            return
+        path.add(name)
+        for ref in IDENT.findall(by_name[name].get("expression") or ""):
+            if ref in by_name and ref != name:
+                visit(ref, path)
+        done.add(name)
+        order.append(by_name[name])
+
+    for p in params:
+        visit(p["name"], set())
+    return order
+
+
+def sc_param_names(sc, timeout):
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "eval.json")
+        try:
+            p = subprocess.run(["solidcraft-cli", "eval", sc, "--json-out", out],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        if p.returncode != 0 or not os.path.exists(out):
+            return None
+        return {q["name"] for q in common.load_json(out).get("params", [])}
+
+
+def restore_params(design_dir, sc, timeout):
+    """Add the Fusion user parameters a conversion dropped back into the .sc.
+
+    Dutchman leaves out parameters it can't decode, and every parameter of a design whose
+    history stops early. Fusion's manifest has them all, with their expressions. They are
+    added as user parameters (they don't drive the imported final shape), in dependency
+    order; one that SolidCraft refuses is skipped, along with the parameters that use it.
+    Returns {"added": [...], "skipped": {name: reason}} or None when there's nothing to do.
+    """
+    manifest = os.path.join(design_dir, "manifest.json")
+    if not os.path.exists(manifest):
+        return None
+    params = common.load_json(manifest).get("parameters") or []
+    have = sc_param_names(sc, timeout) if params else set()
+    if have is None:
+        return {"added": [], "skipped": {"*": "the .sc could not be evaluated"}}
+    todo = [p for p in param_order(params) if p["name"] not in have]
+    result = {"added": [], "skipped": {}}
+    while todo:
+        cmds = [{"command": "parameters.add", "params": {
+            "name": p["name"], "expression": p["expression"], "unit": p.get("unit") or "",
+            **({"comment": p["comment"]} if p.get("comment") else {})}} for p in todo]
+        with tempfile.TemporaryDirectory() as tmp:
+            script, out = os.path.join(tmp, "params.json"), os.path.join(tmp, "out.sc")
+            common.write_json(script, {"commands": cmds})
+            try:
+                r = subprocess.run(["solidcraft-cli", "run", script, "--in", sc, "--save", out, "--quiet"],
+                                   capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                result["skipped"].update({p["name"]: "timed out" for p in todo})
+                break
+            if r.returncode == 0 and os.path.exists(out):
+                os.replace(out, sc)
+                result["added"] = [p["name"] for p in todo]
+                break
+        err = (r.stderr.strip().splitlines() or ["refused"])[-1]
+        m = re.search(r"step (\d+)", err)
+        bad = todo[int(m.group(1)) - 1]["name"] if m and 0 < int(m.group(1)) <= len(todo) else None
+        if bad is None:
+            result["skipped"].update({p["name"]: err for p in todo})
+            break
+        result["skipped"][bad] = err.split(": ", 2)[-1]
+        dropped = {bad}
+        kept = []
+        for p in todo:  # todo is dependency-ordered, so users come after what they use
+            if p["name"] in dropped:
+                continue
+            if dropped & set(IDENT.findall(p.get("expression") or "")):
+                dropped.add(p["name"])
+                result["skipped"][p["name"]] = "uses %s, which was skipped" % bad
+                continue
+            kept.append(p)
+        todo = kept
+    return result
+
+
+def needs_params(report):
+    return report.get("ok") and "params" not in (report.get("f2s") or {}) \
+        and (report.get("f2s") or {}).get("method") != "mesh"
+
+
+def empty_in_fusion(design_dir):
+    manifest = os.path.join(design_dir, "manifest.json")
+    return os.path.exists(manifest) and common.nothing_in_fusion(common.load_json(manifest))
+
+
 def convert(design_dir, archive, preset, timeout):
-    """Convert one design; return (ok, method, seconds, message)."""
+    """Convert one design; return (ok, method, seconds, message). ok is None when Fusion
+    has nothing to convert, so there's no .sc to make."""
     s = common.stem(archive)
     sc = os.path.join(design_dir, s + ".sc")
     report_path = os.path.join(design_dir, s + ".dutchman.json")
@@ -134,6 +244,11 @@ def convert(design_dir, archive, preset, timeout):
             attempts.append({"method": method, "ok": ok, "error": error_of(report)[1] or None})
 
     report["f2s"] = {"method": method, "attempts": attempts}
+    if not ok and empty_in_fusion(design_dir):
+        report["f2s"]["empty"] = True
+        ok = None
+    if needs_params(report):
+        report["f2s"]["params"] = restore_params(design_dir, sc, timeout)
     common.write_json(report_path, report)
     return ok, method, time.time() - t0, attempts[-1].get("error") or ""
 
@@ -153,14 +268,24 @@ def main():
     if not jobs:
         print("no Fusion archives under %s (run 'Export Hub to SolidCraft' in Fusion first, or check --only/--design)" % ws.designs)
         return 1
-    done = skipped = failed = 0
+    done = skipped = failed = empty = 0
     for n, (d, archive) in enumerate(jobs, 1):
         rel = os.path.relpath(archive, ws.designs)
         s = common.stem(archive)
-        if not args.force and up_to_date(archive, os.path.join(d, s + ".sc"), os.path.join(d, s + ".dutchman.json")):
+        report_path = os.path.join(d, s + ".dutchman.json")
+        if not args.force and up_to_date(archive, os.path.join(d, s + ".sc"), report_path):
+            report = common.load_json(report_path)
+            if needs_params(report):  # converted before parameter restoring existed
+                report["f2s"]["params"] = restore_params(d, os.path.join(d, s + ".sc"), args.timeout)
+                common.write_json(report_path, report)
+                print("[%d/%d] %-22s %s" % (n, len(jobs), "params", rel), flush=True)
             skipped += 1
             continue
         ok, method, secs, msg = convert(d, archive, args.preset, args.timeout)
+        if ok is None:
+            empty += 1
+            print("[%d/%d] %-22s %6.1fs  %s" % (n, len(jobs), "empty", secs, rel), flush=True)
+            continue
         status = ("ok " if ok else "FAIL ") + method
         print("[%d/%d] %-22s %6.1fs  %s" % (n, len(jobs), status, secs, rel), flush=True)
         if ok:
@@ -169,7 +294,7 @@ def main():
             failed += 1
             if msg:
                 print("         " + msg, file=sys.stderr)
-    print("converted %d, up to date %d, failed %d" % (done, skipped, failed))
+    print("converted %d, up to date %d, empty in Fusion %d, failed %d" % (done, skipped, empty, failed))
     return 1 if failed else 0
 
 

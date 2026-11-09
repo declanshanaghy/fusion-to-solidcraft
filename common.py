@@ -82,6 +82,14 @@ def design_dirs(root, only=None):
         yield dirpath, os.path.join(dirpath, archives[0])
 
 
+def nothing_in_fusion(manifest):
+    """True when Fusion's manifest records no solids, surfaces or visible meshes."""
+    t = manifest.get("totals") or {}
+    bodies = manifest.get("bodies") or []
+    meshes = [m for m in manifest.get("meshes") or [] if m.get("visible")]
+    return not bodies and not meshes and not t.get("solid_bodies") and not t.get("bodies")
+
+
 def stem(archive):
     """Design name of an archive: X.f3d -> X (and X.f3z.f3d, from older exports, -> X)."""
     name = os.path.splitext(os.path.basename(archive))[0]

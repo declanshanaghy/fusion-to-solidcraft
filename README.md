@@ -25,7 +25,7 @@ flowchart LR
   end
   H --> E -->|"① export"| D
   D -->|"② convert"| C -->|".sc"| D
-  D -->|"③ verify"| V -->|"scorecard"| R
+  D -->|"③ verify"| V -->|"scorecard + report"| R
   M -. settings .-> E & C & V
 ```
 
@@ -33,7 +33,7 @@ flowchart LR
 |---|---|---|
 | ① Export | Fusion | Saves each design's files and its ground-truth numbers |
 | ② Convert | Terminal | Turns each design into a SolidCraft `.sc` |
-| ③ Verify | Terminal | Compares each `.sc` with Fusion's numbers and writes a scorecard |
+| ③ Verify | Terminal | Compares each `.sc` with Fusion's numbers and writes a scorecard, then a readable report |
 
 ## Requirements
 
@@ -48,8 +48,8 @@ flowchart LR
 2. Add a `fusion-to-solidcraft.json` to your workspace ([settings](#workspace-settings)).
 3. `make install-fusion` adds the export scripts to Fusion.
 4. In Fusion, go to *Utilities → Scripts and Add-Ins → **Export Hub to SolidCraft** → Run*.
-5. From your workspace, run `convert/convert.py`, then `verify/check.py`, or use a Makefile that wraps them.
-6. Read `reports/scorecard.md`.
+5. From your workspace, run `convert/convert.py`, `verify/check.py`, then `verify/report.py`, or use a Makefile that wraps them.
+6. Read `reports/conversion-report.md`.
 
 ## ① Export: where it writes and what
 
@@ -131,6 +131,7 @@ flowchart TD
   C -->|"mesh STLs"| MS["mesh bodies from STL"] --> OK
   C -->|"STEP with solids"| ST["Dutchman on the STEP<br/>(shape only)"] --> OK
   C -->|"nothing"| E["✗ empty or failed"]
+  OK --> P["add back the Fusion user parameters<br/>Dutchman dropped"]
 ```
 
 - **Writes beside each design:**
@@ -141,21 +142,25 @@ flowchart TD
   - `--only <text>` or `--design <folder>`: just some designs
   - `--force`: re-convert, for example after a tool upgrade
 - **History:** a design keeps editable history up to the first feature SolidCraft can't replay yet. After that, the exact final shape is imported.
+- **Parameters:** Dutchman drops the user parameters it can't decode, and all of them when the history stops early. Convert adds every missing one back from `manifest.json`, with Fusion's expression, and records what it added (or why it couldn't) in the report's `f2s.params`. They don't drive the imported part of a design.
+- **Empty designs:** when Fusion has nothing in a design, convert says so and doesn't retry it.
 
 ## ③ Verify
 
 - **Measures** each `.sc` with `solidcraft-cli eval` and compares it with `manifest.json`:
-  - volume (within 0.1%), body count and bounding box
-  - parameter names and expressions
+  - volume (within 0.1%) against Fusion's visible bodies or all its bodies, body count and bounding box
+  - parameter names, and expressions (a literal Dutchman rewrote in mm, such as `0.75"` as `19.05 mm`, counts as kept)
+- **Explains** each difference where it can: hidden Fusion bodies that came in visible, referenced designs the archive left out, open (not watertight) bodies, bodies merged with the volume intact
 - **No manifest yet?** It checks geometry against Fusion's STEP instead.
 - **Partial designs:** the hidden history copy is left out, so only the final shape is measured.
 - **Writes** `reports/scorecard.md` and `reports/scorecard.csv`. A subset run updates just its rows.
+- **Then `verify/report.py`** turns the scorecard and the Dutchman reports into `reports/conversion-report.md`: categories, timeline and parameter totals, the features that block history, shape differences by cause, and a row per design.
 
 | Category | Meaning |
 |---|---|
-| ✅ full | Every Fusion feature became editable SolidCraft history |
-| 🟡 partial | Editable history up to the first unmapped feature, then the imported final shape |
-| 🟠 geometry | Shape only, no editable history (includes STEP conversions) |
+| ✅ full | The SolidCraft history rebuilds the Fusion shape by itself |
+| 🟡 partial | Editable history up to the first feature it can't replay, then the imported final shape |
+| 🟠 geometry | Shape only, no editable history, though sketches may be kept beside it (includes STEP conversions) |
 | 🔷 mesh | Mesh bodies only |
 | ⚪ empty | Nothing to convert: no solids, surfaces or meshes in Fusion |
 | ❌ failed | No `.sc`, or SolidCraft can't evaluate it |
