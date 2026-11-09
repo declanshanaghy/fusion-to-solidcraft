@@ -71,15 +71,20 @@ def final_bodies(sc, ev, timeout):
         {"command": "timeline.rollback", "params": {"position": imports[-1]}}]})
     if before is None:
         return bodies, "history bodies not separated (%s)" % err
-    history = Counter((b["name"], round(b.get("volume_mm3", 0.0), 3)) for b in before.get("bodies", []))
+    history = Counter((b["name"], round(vol(b), 3)) for b in before.get("bodies", []))
     final = []
     for b in bodies:
-        key = (b["name"], round(b.get("volume_mm3", 0.0), 3))
+        key = (b["name"], round(vol(b), 3))
         if history[key]:
             history[key] -= 1
         else:
             final.append(b)
     return final, ""
+
+
+def vol(body):
+    """A body's volume in mm³; SolidCraft reports null for open bodies such as surfaces."""
+    return body.get("volume_mm3") or 0.0
 
 
 def norm_expr(e):
@@ -129,6 +134,22 @@ def method_note(report):
     if method.startswith("archive-"):
         return "used preset %s (%s)" % (method.split("-", 1)[1], first)
     return ""
+
+
+def step_totals(step, timeout):
+    """Manifest-style totals measured from Fusion's STEP export of the design."""
+    ev, err = sc_eval(step, timeout)
+    if ev is None:
+        return None, err
+    bodies = ev.get("bodies", [])
+    boxes = [b["bbox"] for b in bodies if b.get("bbox")]
+    bbox = None
+    if boxes:
+        bbox = {"min": [min(b["min"][i] for b in boxes) for i in range(3)],
+                "max": [max(b["max"][i] for b in boxes) for i in range(3)]}
+    total = sum(vol(b) for b in bodies)
+    return {"solid_bodies": ev.get("body_count", len(bodies)), "volume_mm3_all_solids": total,
+            "volume_mm3_visible_solids": total, "bbox_mm": bbox}, None
 
 
 def score(root, design_dir, archive, tol, timeout):
@@ -195,7 +216,7 @@ def score(root, design_dir, archive, tol, timeout):
         return row
 
     row["bodies_fusion"] = t["solid_bodies"]
-    vol_sc = sum(b.get("volume_mm3", 0.0) for b in bodies)
+    vol_sc = sum(vol(b) for b in bodies)
     refs = [v for v in (t.get("volume_mm3_visible_solids"), t.get("volume_mm3_all_solids")) if v]
     if refs:
         rel = min(abs(vol_sc - v) / v for v in refs)
@@ -270,7 +291,11 @@ def main():
     versions = common.check_pins(ws, strict=False)
     rows = []
     for d, archive in common.selected(ws, args):
-        r = score(ws.designs, d, archive, args.tolerance, args.timeout)
+        try:
+            r = score(ws.designs, d, archive, args.tolerance, args.timeout)
+        except Exception as e:  # one design's problem must not stop the scorecard
+            r = {"design": os.path.relpath(d, ws.designs), "category": "failed",
+                 "note": "verify error: %s: %s" % (type(e).__name__, e)}
         print("%-9s %s%s" % (r["category"], r["design"], ("  [" + r["note"] + "]") if r.get("note") else ""), flush=True)
         rows.append(r)
     if not rows:
