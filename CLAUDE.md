@@ -21,6 +21,8 @@ Working across the two:
   `fusion/lib/f2s_export.py`, loaded through symlinks (`make install-fusion`). They reload the module on every run, so edits take
   effect without restarting Fusion. They never run conversion or verification. Those run outside Fusion from the workspace
   (`make migrate`, `ONLY=<design>` for one), where every step is scriptable and testable.
+- **Never run convert while Fusion is exporting on the same machine.** Dutchman can need tens of GB (one design estimated
+  29 GB), which starves Fusion and makes the export crawl. Export first, then convert.
 - What Fusion's archive can't carry gets exported separately for convert to fall back on: STEP (geometry, including referenced
   designs) and STL (mesh bodies). New fallbacks go in `convert/convert.py`'s method chain and its README table.
 - A design fails only when its archive can't be exported. Manifest problems are recorded in the manifest's `errors` list.
