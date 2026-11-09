@@ -279,11 +279,16 @@ def read_meshes(root):
     return [{"name": m.name, "owner": owner, "visible": m.isVisible} for owner, m in mesh_bodies(root)]
 
 
-def export_meshes(em, root, out_dir, errors):
-    """Write each visible mesh body to meshes/<n>-<name>.stl; return the file names.
+def export_meshes(em, root, out_dir, errors, design_stem="design"):
+    """Write the design's visible mesh bodies as STL under meshes/; return the file names.
 
     Fusion's archive stores mesh bodies in a container the converter can't decode,
     and STEP leaves them out, so STL is the only way they reach SolidCraft.
+
+    Exporting a mesh body directly works for bodies inside a component occurrence.
+    For a mesh body at the design's root, Fusion reports success but writes nothing.
+    So when no per-body STL appears and the design has no solid bodies (a mesh-only
+    design), the whole design is exported as one STL instead.
     """
     files = []
     meshes = [(o, m) for o, m in mesh_bodies(root) if m.isVisible]
@@ -291,29 +296,47 @@ def export_meshes(em, root, out_dir, errors):
         return files
     mdir = os.path.join(out_dir, "meshes")
     os.makedirs(mdir, exist_ok=True)
+    unwritten = []
     for n, (owner, m) in enumerate(meshes, 1):
-        name = "%02d-%s.stl" % (n, safe(m.name))
-        path = os.path.join(mdir, name)
-        try:
-            opts = em.createSTLExportOptions(m, path)
-            opts.isBinaryFormat = True
-            if not em.execute(opts):
-                errors.append("mesh %s: STL export returned false" % m.name)
-            elif wait_for_file(path):
-                files.append("meshes/" + name)
-            else:
-                # Fusion reports success but writes nothing for some documents opened in
-                # the background; the caller retries those with the document visible.
-                errors.append("%s %s" % (MESH_NOT_WRITTEN, m.name))
-        except Exception as e:
-            errors.append("mesh %s: %s" % (m.name, e))
+        path = os.path.join(mdir, "%02d-%s.stl" % (n, safe(m.name)))
+        if stl(em, m, path, errors, m.name):
+            files.append("meshes/" + os.path.basename(path))
+        else:
+            unwritten.append(m.name)
+    if unwritten and not has_solids(root):
+        path = os.path.join(mdir, "00-%s.stl" % safe(design_stem))
+        if stl(em, root, path, errors, "whole design"):
+            return ["meshes/" + os.path.basename(path)]
+    errors.extend("%s %s" % (MESH_NOT_WRITTEN, name) for name in unwritten)
+    if not files and os.path.isdir(mdir) and not os.listdir(mdir):
+        os.rmdir(mdir)
     return files
+
+
+def stl(em, geometry, path, errors, label):
+    """Export geometry to a binary STL; True only if the file really appeared."""
+    try:
+        opts = em.createSTLExportOptions(geometry, path)
+        opts.isBinaryFormat = True
+        if not em.execute(opts):
+            errors.append("STL %s: export returned false" % label)
+            return False
+    except Exception as e:
+        errors.append("STL %s: %s" % (label, e))
+        return False
+    return wait_for_file(path)
+
+
+def has_solids(root):
+    if any(b.isSolid for b in items(root.bRepBodies)):
+        return True
+    return any(b.isSolid for occ in items(root.allOccurrences) for b in items(occ.bRepBodies))
 
 
 MESH_NOT_WRITTEN = "mesh STL not written:"
 
 
-def wait_for_file(path, timeout=15.0):
+def wait_for_file(path, timeout=5.0):
     """Fusion can finish writing an export after execute() returns; wait for it."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -468,7 +491,8 @@ def export_doc(doc, df, out_dir, stem, cfg, with_manifest=True, reuse=None):
         notes = []
         refs = attempt(notes, "references",
                        lambda: [r.dataFile.name for r in items(doc.documentReferences) if r.dataFile], [])
-        meshes = attempt(notes, "mesh export", lambda: export_meshes(em, design.rootComponent, out_dir, notes), [])
+        meshes = attempt(notes, "mesh export",
+                         lambda: export_meshes(em, design.rootComponent, out_dir, notes, stem), [])
         manifest = write_manifest(out_dir, df, design, archive, bool(reuse),
                                   {"references": refs, "mesh_files": meshes, "errors": notes})
     return ("manifest" if reuse else "exported"), manifest
@@ -478,20 +502,10 @@ def export_file(app, df, out_dir, stem, cfg, with_manifest=True, allow_reuse=Tru
     reuse = reusable_archive(out_dir, stem, df) if (with_manifest and allow_reuse) else None
     doc, ours = open_doc(app, df)
     try:
-        how, manifest = export_doc(doc, df, out_dir, stem, cfg, with_manifest, reuse)
+        return export_doc(doc, df, out_dir, stem, cfg, with_manifest, reuse)
     finally:
         if ours:
             doc.close(False)
-    if ours and manifest and any(e.startswith(MESH_NOT_WRITTEN) for e in manifest.get("errors", [])):
-        # Mesh STLs only reliably export from a visible document: reopen it visibly and
-        # redo just the manifest and meshes, reusing the archive written above.
-        doc = app.documents.open(df, True)
-        try:
-            archive = os.path.join(out_dir, manifest["fusion"]["archive"])
-            _, manifest = export_doc(doc, df, out_dir, stem, cfg, with_manifest, archive)
-        finally:
-            doc.close(False)
-    return how, manifest
 
 
 def export_versions(app, df, out_dir, stem, cfg):
@@ -508,8 +522,12 @@ def export_versions(app, df, out_dir, stem, cfg):
 
 
 def already_done(out_dir, df):
-    m = (read_json(os.path.join(out_dir, "manifest.json"), {}) or {}).get("fusion", {})
-    return m.get("id") == df.id and m.get("version") == df.versionNumber
+    """Done means a manifest for this Fusion version with nothing left to retry."""
+    manifest = read_json(os.path.join(out_dir, "manifest.json"), {}) or {}
+    m = manifest.get("fusion", {})
+    if m.get("id") != df.id or m.get("version") != df.versionNumber:
+        return False
+    return not any(str(e).startswith(MESH_NOT_WRITTEN) for e in manifest.get("errors") or [])
 
 
 # ---------------------------------------------------------------- scripts

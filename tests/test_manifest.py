@@ -86,9 +86,12 @@ class FakeExportManager:
 
 
 class SilentExportManager(FakeExportManager):
-    """Fusion's behaviour for some background documents: success, but no file."""
+    """Fusion's behaviour for a mesh body at the design root: success, but no file.
+    Exporting the whole root component does write."""
 
     def execute(self, opts):
+        if getattr(opts.geometry, "bRepBodies", None) is not None:  # a component
+            return FakeExportManager.execute(self, opts)
         return True
 
 
@@ -143,18 +146,43 @@ class ManifestTest(unittest.TestCase):
             files = self.m.export_meshes(FakeExportManager(), d.rootComponent, out, errors)
             self.assertEqual((files, errors), (["meshes/01-Insert.stl"], []))
 
-    def test_unwritten_stl_is_not_listed(self):
-        # In the first clean hub export, 10 of 11 mesh designs listed STLs that Fusion
-        # never wrote (execute() returned True). They must be reported, not listed.
+    def _no_wait(self):
         original = self.m.wait_for_file
         self.addCleanup(setattr, self.m, "wait_for_file", original)
-        self.m.wait_for_file = lambda path, timeout=0: os.path.exists(path)  # no 15 s wait in tests
+        self.m.wait_for_file = lambda path, timeout=0: os.path.exists(path)  # no real waiting in tests
+
+    def test_root_mesh_falls_back_to_whole_design_stl(self):
+        # In the first clean hub export, 10 mesh-only designs had their mesh at the design
+        # root: Fusion's per-body STL export returned True and wrote nothing.
+        self._no_wait()
+        d = design(parametric=False, meshes=[types.SimpleNamespace(name="MeshBody1", isVisible=True)])
+        d.rootComponent.bRepBodies = Coll([])  # mesh-only design
+        with tempfile.TemporaryDirectory() as out:
+            errors = []
+            files = self.m.export_meshes(SilentExportManager(), d.rootComponent, out, errors, "mfLink_90")
+            self.assertEqual((files, errors), (["meshes/00-mfLink_90.stl"], []))
+
+    def test_unwritten_stl_is_reported_not_listed(self):
+        # With solid bodies present, the whole-design STL would mix them in, so the
+        # missing mesh is reported instead.
+        self._no_wait()
         d = design(parametric=False, meshes=[types.SimpleNamespace(name="MeshBody1", isVisible=True)])
         with tempfile.TemporaryDirectory() as out:
             errors = []
-            files = self.m.export_meshes(SilentExportManager(), d.rootComponent, out, errors)
+            files = self.m.export_meshes(SilentExportManager(), d.rootComponent, out, errors, "Part")
             self.assertEqual(files, [])
             self.assertEqual(errors, [self.m.MESH_NOT_WRITTEN + " MeshBody1"])
+            self.assertFalse(os.path.exists(os.path.join(out, "meshes")))
+
+    def test_unwritten_mesh_is_retried_on_the_next_run(self):
+        df = types.SimpleNamespace(id="urn:x", versionNumber=3)
+        with tempfile.TemporaryDirectory() as out:
+            path = os.path.join(out, "manifest.json")
+            self.m.write_json(path, {"fusion": {"id": "urn:x", "version": 3}, "errors": []})
+            self.assertTrue(self.m.already_done(out, df))
+            self.m.write_json(path, {"fusion": {"id": "urn:x", "version": 3},
+                                     "errors": [self.m.MESH_NOT_WRITTEN + " MeshBody1"]})
+            self.assertFalse(self.m.already_done(out, df))
 
     def test_items_handles_collections_and_vectors(self):
         self.assertEqual(self.m.items(Coll([1, 2])), [1, 2])
