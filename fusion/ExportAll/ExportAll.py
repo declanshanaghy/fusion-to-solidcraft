@@ -7,7 +7,8 @@ designs), a STEP copy, and manifest.json, the ground truth verify/check.py compa
 the converted SolidCraft design against.
 
 Re-running resumes: a design whose manifest records the current Fusion version is
-skipped. Settings are layered, later ones winning: export_config.json (the tool's
+skipped, and one whose archive is already on disk (and no older than the design in
+Fusion) is only opened to write its missing manifest. Settings are layered, later ones winning: export_config.json (the tool's
 defaults), the workspace marker's "hub" and "export" block, and then
 export_config.local.json beside this script (untracked: the workspace path, the last
 hub chosen, and any one-off overrides such as "limit").
@@ -301,22 +302,48 @@ def open_doc(app, df):
     return app.documents.open(df, False), True
 
 
+def reusable_archive(out_dir, stem, df):
+    """An archive from an earlier run that is at least as new as the design in Fusion.
+
+    Lets a run whose manifests failed be finished without exporting everything again:
+    the design is only opened to write the missing manifest (and STEP).
+    """
+    for ext in ("f3d", "f3z"):
+        path = os.path.join(out_dir, "%s.%s" % (stem, ext))
+        if os.path.exists(path):
+            try:
+                if os.path.getmtime(path) < df.dateModified:
+                    return None  # the design changed in Fusion since this archive
+            except Exception:
+                pass
+            return path
+    return None
+
+
 def export_one(app, df, out_dir, stem, cfg, with_manifest):
+    """Export one design; returns "exported" or "manifest" (archive reused)."""
+    reuse = reusable_archive(out_dir, stem, df) if with_manifest else None
     doc, ours = open_doc(app, df)
     try:
         design = adsk.fusion.Design.cast(doc.products.itemByProductType("DesignProductType"))
         if not design:
             raise RuntimeError("no Design product")
         em = design.exportManager
-        ext = "f3z" if doc.documentReferences.count > 0 else "f3d"
-        archive = os.path.join(out_dir, "%s.%s" % (stem, ext))
-        if not em.execute(em.createFusionArchiveExportOptions(archive)):
-            raise RuntimeError("Fusion archive export failed")
-        if with_manifest and cfg.get("export_step", True):
-            em.execute(em.createSTEPExportOptions(os.path.join(out_dir, stem + ".step")))
+        if reuse:
+            archive = reuse
+        else:
+            ext = "f3z" if doc.documentReferences.count > 0 else "f3d"
+            archive = os.path.join(out_dir, "%s.%s" % (stem, ext))
+            if not em.execute(em.createFusionArchiveExportOptions(archive)):
+                raise RuntimeError("Fusion archive export failed")
+        step = os.path.join(out_dir, stem + ".step")
+        if with_manifest and cfg.get("export_step", True) and not (reuse and os.path.exists(step)):
+            em.execute(em.createSTEPExportOptions(step))
         if with_manifest:
-            write_json(os.path.join(out_dir, "manifest.json"),
-                       build_manifest(df, design, os.path.basename(archive)))
+            manifest = build_manifest(df, design, os.path.basename(archive))
+            manifest["fusion"]["archive_reused"] = bool(reuse)
+            write_json(os.path.join(out_dir, "manifest.json"), manifest)
+        return "manifest" if reuse else "exported"
     finally:
         if ours:
             doc.close(False)
@@ -342,7 +369,7 @@ def run(context):
         return
     cfg = load_config(ws)
     log = Log(os.path.join(cfg["reports_dir"], "export.log"))
-    summary = {"exported": [], "skipped": [], "failed": []}
+    summary = {"exported": [], "manifest_only": [], "skipped": [], "failed": []}
     progress = None
     try:
         hub = choose_hub(app, ui, cfg.get("hub"))
@@ -398,9 +425,9 @@ def run(context):
                             continue
                         export_one(app, vf, vdir, vstem, cfg, with_manifest=False)
                         adsk.doEvents()
-                export_one(app, df, out_dir, stem, cfg, with_manifest=True)
-                summary["exported"].append(label)
-                log.write("ok   %s v%d" % (label, df.versionNumber))
+                how = export_one(app, df, out_dir, stem, cfg, with_manifest=True)
+                summary["exported" if how == "exported" else "manifest_only"].append(label)
+                log.write("ok   %s v%d%s" % (label, df.versionNumber, " (manifest only)" if how == "manifest" else ""))
             except Exception:
                 summary["failed"].append({"design": label, "error": traceback.format_exc()})
                 log.write("FAIL %s\n%s" % (label, traceback.format_exc()))
@@ -409,8 +436,10 @@ def run(context):
         write_json(os.path.join(cfg["reports_dir"], "export-summary.json"), summary)
         progress.hide()
         progress = None
-        ui.messageBox("Export finished.\nExported: %d\nAlready up to date: %d\nFailed: %d\n\nLog: %s"
-                      % (len(summary["exported"]), len(summary["skipped"]), len(summary["failed"]),
+        ui.messageBox("Export finished.\nExported: %d\nManifest only (archive reused): %d\n"
+                      "Already up to date: %d\nFailed: %d\n\nLog: %s"
+                      % (len(summary["exported"]), len(summary["manifest_only"]), len(summary["skipped"]),
+                         len(summary["failed"]),
                          os.path.join(cfg["reports_dir"], "export.log")))
     except Exception:
         log.write("FATAL\n" + traceback.format_exc())

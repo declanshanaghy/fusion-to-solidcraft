@@ -11,6 +11,10 @@ Category per design:
   geometry  shape only (no editable history)
   failed    no .sc, the conversion failed, or SolidCraft cannot evaluate it
 A design is also flagged when its volume, body count or parameters disagree.
+
+Reference: manifest.json when the export wrote one (geometry, parameters and
+timeline). Without it, Fusion's own STEP export of the design is measured instead,
+which checks geometry only.
 """
 
 import argparse
@@ -24,7 +28,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import common  # noqa: E402
 
-FIELDS = ["design", "category", "mapped", "total", "volume_ok", "volume_rel_err", "bodies_fusion",
+FIELDS = ["design", "category", "reference", "mapped", "total", "volume_ok", "volume_rel_err", "bodies_fusion",
           "bodies_sc", "bbox_max_diff_mm", "params_fusion", "params_missing", "params_changed",
           "timeline_errors", "first_blocker", "losses", "note"]
 
@@ -58,6 +62,22 @@ def category(report):
     return "geometry"
 
 
+def step_totals(step, timeout):
+    """Manifest-style totals measured from Fusion's STEP export of the design."""
+    ev, err = sc_eval(step, timeout)
+    if ev is None:
+        return None, err
+    bodies = ev.get("bodies", [])
+    vol = sum(b.get("volume_mm3", 0.0) for b in bodies)
+    boxes = [b["bbox"] for b in bodies if b.get("bbox")]
+    bbox = None
+    if boxes:
+        bbox = {"min": [min(b["min"][i] for b in boxes) for i in range(3)],
+                "max": [max(b["max"][i] for b in boxes) for i in range(3)]}
+    return {"solid_bodies": ev.get("body_count", len(bodies)), "volume_mm3_all_solids": vol,
+            "volume_mm3_visible_solids": vol, "bbox_mm": bbox}, None
+
+
 def score(root, design_dir, archive, tol, timeout):
     s = common.stem(archive)
     row = {"design": os.path.relpath(design_dir, root)}
@@ -84,11 +104,21 @@ def score(root, design_dir, archive, tol, timeout):
     row["timeline_errors"] = sum(1 for t in ev.get("timeline", []) if t.get("error"))
     row["bodies_sc"] = ev.get("body_count", len(ev.get("bodies", [])))
 
-    if not manifest:
-        row["note"] = "no manifest.json: geometry not checked"
+    step = os.path.join(design_dir, s + ".step")
+    if manifest:
+        row["reference"] = "manifest"
+        t = manifest["totals"]
+    elif os.path.exists(step):
+        row["reference"] = "step"
+        t, err = step_totals(step, timeout)
+        if t is None:
+            row["note"] = "Fusion STEP could not be measured: %s" % err
+            return row
+    else:
+        row["reference"] = "none"
+        row["note"] = "no manifest.json or STEP: geometry not checked"
         return row
 
-    t = manifest["totals"]
     row["bodies_fusion"] = t["solid_bodies"]
     vol_sc = sum(b.get("volume_mm3", 0.0) for b in ev.get("bodies", []))
     refs = [v for v in (t.get("volume_mm3_visible_solids"), t.get("volume_mm3_all_solids")) if v]
@@ -107,8 +137,8 @@ def score(root, design_dir, archive, tol, timeout):
             max(abs(lo[i] - fb["min"][i]), abs(hi[i] - fb["max"][i])) for i in range(3))
 
     sc_params = {p["name"]: p for p in ev.get("params", []) if not p.get("model")}
-    fparams = manifest.get("parameters", [])
-    row["params_fusion"] = len(fparams)
+    fparams = manifest.get("parameters", []) if manifest else []
+    row["params_fusion"] = len(fparams) if manifest else "n/a"
     missing = [p["name"] for p in fparams if p["name"] not in sc_params]
     changed = [p["name"] for p in fparams if p["name"] in sc_params
                and norm_expr(p["expression"]) != norm_expr(sc_params[p["name"]].get("expression"))]

@@ -68,7 +68,7 @@ If the workspace is a git repo, track the CAD binaries with Git LFS (`*.f3d *.f3
    with a sibling folder that has the marker file. It then asks which hub to export. Both
    answers are remembered in `fusion/ExportAll/export_config.local.json` (untracked), which
    is also where one-off overrides go, such as `"limit": 5` for a trial run. Re-running is safe:
-   a design whose Fusion version hasn't changed is skipped. Each design gets its archive, a
+   a design whose Fusion version hasn't changed is skipped, and if a design's archive is already on disk but its manifest is missing, only the manifest is written. Each design gets its archive, a
    STEP copy, and a `manifest.json` that records its user parameters, timeline, sketches,
    bodies, volumes and bounding box. The manifest is the ground truth for verification.
 2. **Convert.** Run `convert/convert.py` from the workspace (or pass `--workspace`, or
@@ -78,7 +78,8 @@ If the workspace is a git repo, track the CAD binaries with Git LFS (`*.f3d *.f3
    After that, the final shape is imported. `--force` re-converts after a tool upgrade.
 3. **Verify.** `verify/check.py` measures each `.sc` with `solidcraft-cli eval` and compares
    it with the manifest: volume (within 0.1%), body count, bounding box, and parameters with
-   their expressions. It writes `scorecard.csv` and `scorecard.md`, which group designs into
+   their expressions. A design with no manifest is checked for geometry only, against
+   Fusion's own STEP export. It writes `scorecard.csv` and `scorecard.md`, which group designs into
    full, partial, geometry-only and failed, and name the first blocking feature. The
    scorecard records the tool versions and this repo's commit.
 
