@@ -48,6 +48,16 @@ def find_workspace(explicit=None):
 def add_workspace_arg(ap):
     ap.add_argument("--workspace", help="designs repo holding %s (default: $%s, else cwd or a parent)"
                     % (MARKER, ENV))
+    ap.add_argument("--only", help="only designs whose path contains this text")
+    ap.add_argument("--design", help="only this one design folder (exact path)")
+
+
+def selected(ws, args):
+    """The (design_dir, archive) pairs a command's --only/--design select."""
+    if args.design:
+        d = os.path.abspath(args.design)
+        return [(dd, a) for dd, a in design_dirs(d) if dd == d]
+    return list(design_dirs(ws.designs, args.only))
 
 
 def design_dirs(root, only=None):

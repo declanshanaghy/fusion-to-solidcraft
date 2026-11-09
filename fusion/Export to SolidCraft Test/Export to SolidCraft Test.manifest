@@ -1,0 +1,8 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "script",
+  "author": "Declan Shanaghy",
+  "description": {"": "Export the open design, convert it to SolidCraft and verify it, to iterate on one design at a time"},
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

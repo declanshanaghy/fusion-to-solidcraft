@@ -46,7 +46,6 @@ def convert(archive, preset, timeout):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     common.add_workspace_arg(ap)
-    ap.add_argument("--only", help="only designs whose path contains this text")
     ap.add_argument("--preset", default="full", choices=["fast", "standard", "full"])
     ap.add_argument("--force", action="store_true", help="re-convert even when the .sc is up to date")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds per design")
@@ -55,7 +54,7 @@ def main():
 
     ws = common.find_workspace(args.workspace)
     common.check_pins(ws, args.strict_versions)
-    jobs = list(common.design_dirs(ws.designs, args.only))
+    jobs = common.selected(ws, args)
     if not jobs:
         print("no Fusion archives under %s (run the Fusion ExportAll script first)" % ws.designs)
         return 1

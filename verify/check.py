@@ -185,7 +185,6 @@ def write_md(rows, path, versions):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     common.add_workspace_arg(ap)
-    ap.add_argument("--only", help="only designs whose path contains this text")
     ap.add_argument("--tolerance", type=float, default=0.001, help="relative volume tolerance (default 0.1%%)")
     ap.add_argument("--timeout", type=int, default=600, help="seconds per solidcraft-cli eval")
     ap.add_argument("--out", help="report folder (default: the workspace's reports_dir)")
@@ -195,7 +194,7 @@ def main():
     out = args.out or ws.reports
     versions = common.check_pins(ws, strict=False)
     rows = []
-    for d, archive in common.design_dirs(ws.designs, args.only):
+    for d, archive in common.selected(ws, args):
         r = score(ws.designs, d, archive, args.tolerance, args.timeout)
         print("%-9s %s%s" % (r["category"], r["design"], ("  [" + r["note"] + "]") if r.get("note") else ""), flush=True)
         rows.append(r)
@@ -203,7 +202,15 @@ def main():
         print("no designs under %s" % ws.designs)
         return 1
     os.makedirs(out, exist_ok=True)
-    with open(os.path.join(out, "scorecard.csv"), "w", newline="", encoding="utf-8") as f:
+    csv_path = os.path.join(out, "scorecard.csv")
+    if (args.only or args.design) and os.path.exists(csv_path):
+        # A subset run updates its designs' rows and keeps everyone else's.
+        fresh = {r["design"] for r in rows}
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            kept = [r for r in csv.DictReader(f) if r.get("design") not in fresh
+                    and os.path.isdir(os.path.join(ws.designs, r.get("design", "")))]
+        rows = sorted(kept + rows, key=lambda r: r["design"])
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
