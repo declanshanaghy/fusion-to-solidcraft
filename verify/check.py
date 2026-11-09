@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import common  # noqa: E402
@@ -33,17 +34,50 @@ FIELDS = ["design", "category", "reference", "mapped", "total", "volume_ok", "vo
           "timeline_errors", "first_blocker", "losses", "note"]
 
 
-def sc_eval(sc, timeout):
+def sc_eval(sc, timeout, script=None):
+    """Measure a design (or STEP). With script, it runs on the design first (--in)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "eval.json")
+        cmd = ["solidcraft-cli", "eval", sc, "--json-out", out]
+        if script is not None:
+            path = os.path.join(tmp, "script.json")
+            common.write_json(path, script)
+            cmd = ["solidcraft-cli", "eval", path, "--in", sc, "--json-out", out]
         try:
-            p = subprocess.run(["solidcraft-cli", "eval", sc, "--json-out", out],
-                               capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return None, "eval timed out"
         if p.returncode != 0 or not os.path.exists(out):
             return None, (p.stderr.strip().splitlines() or ["eval failed"])[-1]
         return common.load_json(out), None
+
+
+def final_bodies(sc, ev, timeout):
+    """The bodies that make up the design's final shape, and a note on how they were chosen.
+
+    A partial conversion keeps its editable history and then imports the exact final
+    shape as a last base feature. The history's own bodies stay in the design, hidden,
+    and must not be counted twice. Rolling back to just before that import shows which
+    bodies belong to the history; the final shape is every other body.
+    """
+    bodies = ev.get("bodies", [])
+    timeline = ev.get("timeline", [])
+    imports = [i for i, t in enumerate(timeline) if t.get("type") == "BaseFeature"]
+    if not imports or imports[-1] == 0:
+        return bodies, ""
+    before, err = sc_eval(sc, timeout, {"commands": [
+        {"command": "timeline.rollback", "params": {"position": imports[-1]}}]})
+    if before is None:
+        return bodies, "history bodies not separated (%s)" % err
+    history = Counter((b["name"], round(b.get("volume_mm3", 0.0), 3)) for b in before.get("bodies", []))
+    final = []
+    for b in bodies:
+        key = (b["name"], round(b.get("volume_mm3", 0.0), 3))
+        if history[key]:
+            history[key] -= 1
+        else:
+            final.append(b)
+    return final, ""
 
 
 def norm_expr(e):
@@ -102,7 +136,9 @@ def score(root, design_dir, archive, tol, timeout):
         row.update(category="failed", note=err)
         return row
     row["timeline_errors"] = sum(1 for t in ev.get("timeline", []) if t.get("error"))
-    row["bodies_sc"] = ev.get("body_count", len(ev.get("bodies", [])))
+    bodies, body_note = (final_bodies(sc, ev, timeout) if row["category"] == "partial"
+                         else (ev.get("bodies", []), ""))
+    row["bodies_sc"] = len(bodies)
 
     step = os.path.join(design_dir, s + ".step")
     if manifest:
@@ -120,7 +156,7 @@ def score(root, design_dir, archive, tol, timeout):
         return row
 
     row["bodies_fusion"] = t["solid_bodies"]
-    vol_sc = sum(b.get("volume_mm3", 0.0) for b in ev.get("bodies", []))
+    vol_sc = sum(b.get("volume_mm3", 0.0) for b in bodies)
     refs = [v for v in (t.get("volume_mm3_visible_solids"), t.get("volume_mm3_all_solids")) if v]
     if refs:
         rel = min(abs(vol_sc - v) / v for v in refs)
@@ -129,7 +165,7 @@ def score(root, design_dir, archive, tol, timeout):
     else:
         row["volume_ok"] = vol_sc == 0
     fb = t.get("bbox_mm")
-    boxes = [b["bbox"] for b in ev.get("bodies", []) if b.get("bbox")]
+    boxes = [b["bbox"] for b in bodies if b.get("bbox")]
     if fb and boxes:
         lo = [min(b["min"][i] for b in boxes) for i in range(3)]
         hi = [max(b["max"][i] for b in boxes) for i in range(3)]
@@ -144,7 +180,7 @@ def score(root, design_dir, archive, tol, timeout):
                and norm_expr(p["expression"]) != norm_expr(sc_params[p["name"]].get("expression"))]
     row["params_missing"] = " ".join(missing)
     row["params_changed"] = " ".join(changed)
-    notes = []
+    notes = [body_note] if body_note else []
     if row.get("volume_ok") is False:
         notes.append("volume differs")
     if row["bodies_sc"] != row["bodies_fusion"]:
