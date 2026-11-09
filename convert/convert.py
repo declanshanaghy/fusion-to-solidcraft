@@ -151,7 +151,7 @@ def main():
     common.check_pins(ws, args.strict_versions)
     jobs = common.selected(ws, args)
     if not jobs:
-        print("no Fusion archives under %s (run the Fusion ExportAll script first)" % ws.designs)
+        print("no Fusion archives under %s (run "Export Hub to SolidCraft" in Fusion first, or check --only/--design)" % ws.designs)
         return 1
     done = skipped = failed = 0
     for n, (d, archive) in enumerate(jobs, 1):

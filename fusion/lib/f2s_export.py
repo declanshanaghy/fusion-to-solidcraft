@@ -645,7 +645,8 @@ def run_active():
             lines.append("Mesh bodies exported as STL: %d" % len(fusion["mesh_files"]))
         if manifest.get("errors"):
             lines.append("Manifest notes: " + "; ".join(manifest["errors"]))
-        lines += ["", "Next, from the designs repo:", '  make migrate ONLY="%s"' % rel[-1]]
+        design_arg = os.path.relpath(out_dir, ws)
+        lines += ["", "Next, from the designs repo:", '  make migrate DESIGN="%s"' % design_arg]
         ui.messageBox("\n".join(lines), TITLE)
     except Exception:
         log.write("FAIL\n" + traceback.format_exc())

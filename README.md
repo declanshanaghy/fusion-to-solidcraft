@@ -113,7 +113,7 @@ flowchart TD
   - Asks which hub, pre-filled with your last choice.
   - Safe to stop and re-run: finished designs are skipped.
 - **Export Current Design to SolidCraft**
-  - Exports the design open in Fusion, then shows the command to convert and verify it.
+  - Exports the design open in Fusion, then shows the exact command to convert and verify just that design (`make migrate DESIGN=…`).
   - The quick loop for working on one design.
 - **Both**
   - Choices are remembered in `fusion/lib/export_config.local.json`, which is untracked. One-off overrides such as `"limit": 5` go there too.
