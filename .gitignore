@@ -1,0 +1,5 @@
+.DS_Store
+__pycache__/
+*.pyc
+# per-machine settings the Fusion script saves (workspace path, last hub)
+fusion/ExportAll/export_config.local.json

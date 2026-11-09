@@ -1,0 +1,8 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "script",
+  "author": "Declan Shanaghy",
+  "description": {"": "Export every design in a Fusion hub, with ground-truth manifests, into a designs workspace for conversion to SolidCraft"},
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}
