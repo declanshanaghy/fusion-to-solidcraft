@@ -2,7 +2,7 @@
 # workspace, which calls into this repo; see README.
 PY := python3
 
-.PHONY: install-fusion check
+.PHONY: install-fusion check hooks
 
 install-fusion:   ## link the Fusion scripts into Fusion's Scripts folder
 	fusion/install.sh
@@ -12,3 +12,7 @@ check:            ## syntax-check every script and run the tests
 	$(PY) -m unittest discover -s tests -q
 	@find . -name __pycache__ -prune -exec rm -rf {} +
 	@echo ok
+
+hooks:            ## run `make check` before every push from this clone
+	git config core.hooksPath .githooks
+	@echo "pre-push hook enabled"

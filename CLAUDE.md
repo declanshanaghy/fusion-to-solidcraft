@@ -27,5 +27,7 @@ Working across the two:
   designs) and STL (mesh bodies). New fallbacks go in `convert/convert.py`'s method chain and its README table.
 - A design fails only when its archive can't be exported. Manifest problems are recorded in the manifest's `errors` list.
   Any new Fusion API read must go through `attempt()`, and gets a stub test in `tests/` when it has failed in the field.
+- `make hooks` once per clone: a pre-push hook runs `make check` and blocks the push if it fails. Never pipe
+  `make check` into `tail`/`head` when its result gates a commit: the pipe hides its exit status.
 - Checks before pushing here: `make check` (syntax and the stub-API tests), plus a convert and verify run on a workspace when
   convert or verify change.

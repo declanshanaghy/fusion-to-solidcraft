@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Refuse to push unless the checks pass. Enable once per clone: make hooks
+exec make -s check
